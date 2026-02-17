@@ -12,7 +12,8 @@ export type WSMessageType =
   | "kpi.updated"
   | "alarm.raised"
   | "alarm.cleared"
-  | "order.updated";
+  | "order.updated"
+  | "heatmap.updated";
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;

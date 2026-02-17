@@ -3,11 +3,11 @@ import type { Station } from "../types/station";
 import type { PickTask } from "../types/pickTask";
 import type { Order } from "../types/order";
 import type { Alarm } from "../types/alarm";
-import type { WSMessage, WSMessageType, KPIPayload, SnapshotPayload, RobotUpdatedPayload } from "../types/websocket";
+import type { WSMessage, KPIPayload, SnapshotPayload, RobotUpdatedPayload } from "../types/websocket";
 
 type MessageHandler = (payload: unknown) => void;
 
-const handlers: Record<WSMessageType, MessageHandler> = {
+const handlers: Record<string, MessageHandler> = {
   snapshot: (payload) => {
     useWarehouseStore.getState().setSnapshot(payload as SnapshotPayload);
   },
@@ -40,6 +40,11 @@ const handlers: Record<WSMessageType, MessageHandler> = {
 
   "order.updated": (payload) => {
     useWarehouseStore.getState().updateOrder(payload as Order);
+  },
+
+  "heatmap.updated": (payload) => {
+    const { cells } = payload as { cells: Record<string, number> };
+    useWarehouseStore.getState().updateHeatmap(cells);
   },
 };
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useScanItem } from "../../../api/hooks";
 import type { PickTask } from "../../../types/pickTask";
 
@@ -9,13 +9,35 @@ interface Props {
 
 export default function ScanInterface({ stationId, activeTask }: Props) {
   const [barcode, setBarcode] = useState("");
+  const [flash, setFlash] = useState<"success" | "error" | null>(null);
   const scan = useScanItem();
+  const flashTimeout = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    return () => {
+      if (flashTimeout.current) clearTimeout(flashTimeout.current);
+    };
+  }, []);
+
+  const triggerFlash = (type: "success" | "error") => {
+    setFlash(type);
+    if (flashTimeout.current) clearTimeout(flashTimeout.current);
+    flashTimeout.current = setTimeout(() => setFlash(null), 600);
+  };
 
   const handleScan = () => {
     if (!activeTask || !barcode.trim()) return;
     scan.mutate(
       { stationId, pickTaskId: activeTask.id },
-      { onSuccess: () => setBarcode("") },
+      {
+        onSuccess: () => {
+          setBarcode("");
+          triggerFlash("success");
+        },
+        onError: () => {
+          triggerFlash("error");
+        },
+      },
     );
   };
 
@@ -25,13 +47,26 @@ export default function ScanInterface({ stationId, activeTask }: Props) {
     }
   };
 
+  const borderColor = flash === "error"
+    ? "#ef4444"
+    : flash === "success"
+      ? "#22c55e"
+      : "var(--border)";
+
+  const bgColor = flash === "success"
+    ? "rgba(34, 197, 94, 0.08)"
+    : flash === "error"
+      ? "rgba(239, 68, 68, 0.08)"
+      : "var(--bg-card)";
+
   return (
     <div
       style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
+        background: bgColor,
+        border: `2px solid ${borderColor}`,
         borderRadius: "var(--radius)",
         padding: 20,
+        transition: "background 0.3s, border-color 0.3s",
       }}
     >
       <h3 style={{ fontSize: 16, marginBottom: 12 }}>Scan Item</h3>
@@ -62,11 +97,12 @@ export default function ScanInterface({ stationId, activeTask }: Props) {
                 flex: 1,
                 padding: "10px 14px",
                 borderRadius: 6,
-                border: "1px solid var(--border)",
+                border: `1px solid ${flash === "error" ? "#ef4444" : "var(--border)"}`,
                 background: "var(--bg-secondary)",
                 color: "var(--text-primary)",
                 fontSize: 16,
                 fontFamily: "var(--font-mono)",
+                transition: "border-color 0.3s",
               }}
             />
             <button

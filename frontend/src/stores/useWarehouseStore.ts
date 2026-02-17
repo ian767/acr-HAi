@@ -6,6 +6,14 @@ import type { Order } from "../types/order";
 import type { Alarm } from "../types/alarm";
 import type { KPIPayload } from "../types/websocket";
 
+export interface RobotAnimation {
+  fromRow: number;
+  fromCol: number;
+  toRow: number;
+  toCol: number;
+  startTime: number;
+}
+
 interface WarehouseState {
   // Real-time state from WebSocket
   robots: Record<string, RobotRealtime>;
@@ -14,6 +22,12 @@ interface WarehouseState {
   orders: Order[];
   alarms: Alarm[];
   kpi: KPIPayload | null;
+
+  // Animation state for smooth robot movement
+  robotAnimations: Record<string, RobotAnimation>;
+
+  // Heatmap data: "row,col" -> congestion value (0..1)
+  heatmap: Record<string, number>;
 
   // Connection status
   connected: boolean;
@@ -34,6 +48,7 @@ interface WarehouseState {
   addAlarm: (alarm: Alarm) => void;
   clearAlarm: (alarmId: string) => void;
   setConnected: (connected: boolean) => void;
+  updateHeatmap: (cells: Record<string, number>) => void;
 }
 
 export const useWarehouseStore = create<WarehouseState>((set) => ({
@@ -43,6 +58,8 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   orders: [],
   alarms: [],
   kpi: null,
+  robotAnimations: {},
+  heatmap: {},
   connected: false,
 
   setSnapshot: (data) =>
@@ -54,10 +71,29 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
       alarms: data.alarms,
     }),
 
-  updateRobots: (robots) =>
-    set((state) => ({
-      robots: { ...state.robots, ...robots },
-    })),
+  updateRobots: (incoming) =>
+    set((state) => {
+      const now = performance.now();
+      const newAnimations = { ...state.robotAnimations };
+
+      for (const [id, robot] of Object.entries(incoming)) {
+        const prev = state.robots[id];
+        if (prev && (prev.row !== robot.row || prev.col !== robot.col)) {
+          newAnimations[id] = {
+            fromRow: prev.row,
+            fromCol: prev.col,
+            toRow: robot.row,
+            toCol: robot.col,
+            startTime: now,
+          };
+        }
+      }
+
+      return {
+        robots: { ...state.robots, ...incoming },
+        robotAnimations: newAnimations,
+      };
+    }),
 
   updateStation: (station) =>
     set((state) => ({
@@ -89,4 +125,6 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
     })),
 
   setConnected: (connected) => set({ connected }),
+
+  updateHeatmap: (cells) => set({ heatmap: cells }),
 }));

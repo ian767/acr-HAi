@@ -20,11 +20,19 @@ async def build_snapshot() -> dict[str, Any]:
         from src.ess.domain.models import Robot
         from src.wes.domain.models import Order, PickTask, Station
 
-        # Robots
+        # Robots — include cached path data for immediate frontend display.
+        from src.ess.infrastructure.redis_cache import RobotStateCache
+        from src.shared.redis import get_redis
+
         result = await session.execute(select(Robot))
         robots_raw = result.scalars().all()
-        robots = {
-            str(r.id): {
+
+        redis_client = await get_redis()
+        cache = RobotStateCache(redis_client)
+        robots: dict[str, Any] = {}
+        for r in robots_raw:
+            path = await cache.get_path(r.id)
+            robots[str(r.id)] = {
                 "id": str(r.id),
                 "name": r.name,
                 "type": r.type.value,
@@ -32,9 +40,8 @@ async def build_snapshot() -> dict[str, Any]:
                 "col": r.grid_col,
                 "heading": r.heading,
                 "status": r.status.value,
+                "path": [[row, col] for row, col in path] if path else [],
             }
-            for r in robots_raw
-        }
 
         # Stations
         result = await session.execute(select(Station))

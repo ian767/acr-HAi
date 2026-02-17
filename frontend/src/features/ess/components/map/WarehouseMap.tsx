@@ -1,10 +1,14 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useWarehouseStore } from "@/stores/useWarehouseStore";
+import type { RobotAnimation } from "@/stores/useWarehouseStore";
 import { useUiStore } from "@/stores/useUiStore";
 import { useGrid } from "@/api/hooks";
+import type { RobotRealtime } from "@/types/robot";
+
 // ------------------------------------------------------------------ constants
 
 const CELL_SIZE = 20;
+const ANIMATION_DURATION_MS = 140;
 
 const CELL_COLORS: Record<string, string> = {
   FLOOR: "#1a1d27",
@@ -23,6 +27,41 @@ const ROBOT_COLORS: Record<string, string> = {
 
 export { CELL_SIZE };
 
+// ------------------------------------------------------------------ helpers
+
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function inferType(id: string): string {
+  const lower = id.toLowerCase();
+  if (lower.includes("k50")) return "K50H";
+  if (lower.includes("a42")) return "A42TD";
+  return "K50H";
+}
+
+function interpolateRobot(
+  robot: RobotRealtime,
+  anim: RobotAnimation | undefined,
+  now: number,
+): { x: number; y: number } {
+  if (!anim) {
+    return {
+      x: robot.col * CELL_SIZE + CELL_SIZE / 2,
+      y: robot.row * CELL_SIZE + CELL_SIZE / 2,
+    };
+  }
+  const elapsed = now - anim.startTime;
+  const t = Math.min(1, elapsed / ANIMATION_DURATION_MS);
+  const eased = easeOutCubic(t);
+  const row = anim.fromRow + (anim.toRow - anim.fromRow) * eased;
+  const col = anim.fromCol + (anim.toCol - anim.fromCol) * eased;
+  return {
+    x: col * CELL_SIZE + CELL_SIZE / 2,
+    y: row * CELL_SIZE + CELL_SIZE / 2,
+  };
+}
+
 // ------------------------------------------------------------------ component
 
 export function WarehouseMap() {
@@ -34,6 +73,7 @@ export function WarehouseMap() {
   const zoomRef = useRef(1);
   const draggingRef = useRef(false);
   const lastMouseRef = useRef({ x: 0, y: 0 });
+  const dragStartRef = useRef({ x: 0, y: 0 });
 
   const activeZoneId = useUiStore((s) => s.activeZoneId);
   const { data: gridState, isLoading, error: gridError } = useGrid(activeZoneId ?? "");
@@ -46,9 +86,11 @@ export function WarehouseMap() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const { robots, stations } = useWarehouseStore.getState();
+    const { robots, stations, robotAnimations, heatmap } = useWarehouseStore.getState();
+    const { showPaths, showHeatmap, selectedRobotId } = useUiStore.getState();
     const pan = panRef.current;
     const zoom = zoomRef.current;
+    const now = performance.now();
 
     // Clear
     ctx.fillStyle = "#0e1015";
@@ -75,6 +117,22 @@ export function WarehouseMap() {
           ctx.fillRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
         }
       }
+
+      // ---- Heatmap overlay ----
+      if (showHeatmap) {
+        for (const [key, value] of Object.entries(heatmap)) {
+          const parts = key.split(",");
+          const r = parseInt(parts[0] ?? "", 10);
+          const c = parseInt(parts[1] ?? "", 10);
+          if (isNaN(r) || isNaN(c)) continue;
+          // Interpolate from yellow (low) to red (high)
+          const red = 255;
+          const green = Math.round(255 * (1 - value));
+          const alpha = 0.15 + value * 0.45;
+          ctx.fillStyle = `rgba(${red}, ${green}, 0, ${alpha})`;
+          ctx.fillRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
+        }
+      }
     }
 
     // Draw stations
@@ -93,16 +151,72 @@ export function WarehouseMap() {
       ctx.fillText(station.name, x, y + 16);
     }
 
-    // Draw robots
-    for (const [id, robot] of Object.entries(robots)) {
-      const x = robot.col * CELL_SIZE + CELL_SIZE / 2;
-      const y = robot.row * CELL_SIZE + CELL_SIZE / 2;
-      const color = ROBOT_COLORS[inferType(id)] ?? "#9ca3af";
+    // ---- Draw paths (before robots so they appear behind) ----
+    if (showPaths) {
+      for (const [id, robot] of Object.entries(robots)) {
+        if (!robot.path || robot.path.length === 0) continue;
+        const isSelected = id === selectedRobotId;
+        const pos = interpolateRobot(robot, robotAnimations[id], now);
 
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y);
+        for (const [pr, pc] of robot.path) {
+          ctx.lineTo(pc * CELL_SIZE + CELL_SIZE / 2, pr * CELL_SIZE + CELL_SIZE / 2);
+        }
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = isSelected ? 2 : 1;
+        ctx.strokeStyle = isSelected ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.25)";
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Destination marker
+        const dest = robot.path[robot.path.length - 1];
+        if (!dest) continue;
+        const dx = dest[1] * CELL_SIZE + CELL_SIZE / 2;
+        const dy = dest[0] * CELL_SIZE + CELL_SIZE / 2;
+        ctx.beginPath();
+        ctx.arc(dx, dy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = isSelected ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.35)";
+        ctx.fill();
+      }
+    }
+
+    // ---- Draw robots ----
+    for (const [id, robot] of Object.entries(robots)) {
+      const anim = robotAnimations[id];
+      const pos = interpolateRobot(robot, anim, now);
+      const { x, y } = pos;
+      const color = ROBOT_COLORS[inferType(id)] ?? "#9ca3af";
+      const isSelected = id === selectedRobotId;
+
+      // WAITING / BLOCKED pulse ring
+      if (robot.status === "WAITING" || robot.status === "BLOCKED") {
+        const pulsePhase = (Math.sin(now / 300) + 1) / 2; // 0..1
+        const pulseRadius = 9 + pulsePhase * 4;
+        const pulseColor = robot.status === "BLOCKED"
+          ? `rgba(239, 68, 68, ${0.3 + pulsePhase * 0.4})`
+          : `rgba(234, 179, 8, ${0.3 + pulsePhase * 0.4})`;
+        ctx.beginPath();
+        ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = pulseColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Robot body
       ctx.beginPath();
       ctx.arc(x, y, 7, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
+
+      // Selection ring
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
 
       // Heading indicator
       const headingRad = (robot.heading * Math.PI) / 180;
@@ -171,6 +285,7 @@ export function WarehouseMap() {
     if (e.button === 0 || e.button === 1) {
       draggingRef.current = true;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
     }
   }, []);
 
@@ -181,8 +296,44 @@ export function WarehouseMap() {
     lastMouseRef.current = { x: e.clientX, y: e.clientY };
   }, []);
 
-  const handlePointerUp = useCallback(() => {
+  const handlePointerUp = useCallback((e: PointerEvent) => {
+    if (!draggingRef.current) {
+      draggingRef.current = false;
+      return;
+    }
     draggingRef.current = false;
+
+    // Click detection: if drag distance < 3px, treat as click
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+    if (Math.sqrt(dx * dx + dy * dy) >= 3) return;
+
+    // Convert screen coords to grid coords
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+    const zoom = zoomRef.current;
+    const pan = panRef.current;
+    const worldX = (screenX - pan.x) / zoom;
+    const worldY = (screenY - pan.y) / zoom;
+
+    // Hit-test robots (10px radius)
+    const { robots } = useWarehouseStore.getState();
+    let closestId: string | null = null;
+    let closestDist = 10 / zoom; // 10px in screen space
+
+    for (const [id, robot] of Object.entries(robots)) {
+      const rx = robot.col * CELL_SIZE + CELL_SIZE / 2;
+      const ry = robot.row * CELL_SIZE + CELL_SIZE / 2;
+      const dist = Math.sqrt((worldX - rx) ** 2 + (worldY - ry) ** 2);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestId = id;
+      }
+    }
+
+    useUiStore.getState().selectRobot(closestId);
   }, []);
 
   // ------------------------------------------------------------ lifecycle
@@ -269,11 +420,4 @@ export function WarehouseMap() {
       )}
     </div>
   );
-}
-
-function inferType(id: string): string {
-  const lower = id.toLowerCase();
-  if (lower.includes("k50")) return "K50H";
-  if (lower.includes("a42")) return "A42TD";
-  return "K50H";
 }

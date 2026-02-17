@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from src.deps import SessionDep
 from src.ess.application.fleet_manager import FleetManager
+from src.ess.application.path_planner import PathPlanner
 from src.ess.application.zone_manager import ZoneManager
 from src.ess.domain.enums import CellType, RobotStatus
 from src.ess.simulation.physics_engine import PhysicsEngine
@@ -190,9 +191,13 @@ async def simulation_start(session: SessionDep):
     cache = RobotStateCache(redis_client)
     fm = FleetManager(session)
 
+    planner = PathPlanner(simulation_state.grid) if simulation_state.grid else None
+
     global _simulator
     _simulator = RobotSimulator(
-        fm, traffic, cache, grid=simulation_state.grid,
+        fm, traffic, cache,
+        grid=simulation_state.grid,
+        path_planner=planner,
     )
     engine.register_updatable(_simulator.update)
 

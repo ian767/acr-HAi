@@ -4,9 +4,10 @@ interface Props {
   slots: PutWallSlot[];
   activeSlotId: string | null;
   onSlotClick: (slot: PutWallSlot) => void;
+  onBind?: (slot: PutWallSlot) => void;
 }
 
-export default function PutWallGrid({ slots, activeSlotId, onSlotClick }: Props) {
+export default function PutWallGrid({ slots, activeSlotId, onSlotClick, onBind }: Props) {
   return (
     <div
       style={{
@@ -19,7 +20,12 @@ export default function PutWallGrid({ slots, activeSlotId, onSlotClick }: Props)
       {slots.map((slot) => (
         <button
           key={slot.id}
-          onClick={() => onSlotClick(slot)}
+          onClick={() => {
+            onSlotClick(slot);
+            if (!slot.target_tote_id && !slot.is_locked && onBind) {
+              onBind(slot);
+            }
+          }}
           style={{
             padding: 16,
             borderRadius: "var(--radius)",

@@ -6,11 +6,15 @@ import logging
 import uuid
 
 from src.ess.application.fleet_manager import FleetManager
+from src.ess.application.path_planner import PathPlanner
 from src.ess.application.traffic_controller import TrafficController
 from src.ess.domain.enums import CellType, RobotStatus
 from src.ess.infrastructure.redis_cache import RobotStateCache
 
 logger = logging.getLogger(__name__)
+
+_REROUTE_WAIT_THRESHOLD = 3
+_HEATMAP_BROADCAST_INTERVAL = 10
 
 
 class RobotSimulator:
@@ -30,11 +34,15 @@ class RobotSimulator:
         traffic_controller: TrafficController,
         redis_cache: RobotStateCache,
         grid: list[list[CellType]] | None = None,
+        path_planner: PathPlanner | None = None,
     ) -> None:
         self._fleet = fleet_manager
         self._traffic = traffic_controller
         self._cache = redis_cache
         self._grid = grid
+        self._planner = path_planner
+        self._wait_counts: dict[uuid.UUID, int] = {}
+        self._tick_counter: int = 0
 
     async def update(self, dt: float) -> None:
         """Called once per simulation tick.
@@ -45,16 +53,21 @@ class RobotSimulator:
             Elapsed simulation time in seconds for this tick (used for
             interpolation weighting, currently one discrete step per tick).
         """
+        self._tick_counter += 1
         robots = await self._fleet.list_robots()
         position_updates: dict[str, dict] = {}
 
         for robot in robots:
             path = await self._cache.get_path(robot.id)
             if not path:
+                robot._next_cell = None  # type: ignore[attr-defined]
                 continue
 
             next_cell = path[0]
             target_row, target_col = next_cell
+
+            # Set _next_cell for deadlock detection.
+            robot._next_cell = next_cell  # type: ignore[attr-defined]
 
             # Try to reserve the target cell.
             reserved = self._traffic.reserve_cell(
@@ -63,12 +76,47 @@ class RobotSimulator:
 
             if not reserved:
                 # Cell blocked -- robot waits.
+                self._wait_counts[robot.id] = self._wait_counts.get(robot.id, 0) + 1
+
                 if robot.status != RobotStatus.WAITING:
                     robot.status = RobotStatus.WAITING
                     await self._cache.update_status(
                         robot.id, RobotStatus.WAITING.value
                     )
+                    # Broadcast WAITING transition so frontend knows.
+                    remaining = [[r, c] for r, c in path]
+                    position_updates[str(robot.id)] = {
+                        "id": str(robot.id),
+                        "row": robot.grid_row,
+                        "col": robot.grid_col,
+                        "heading": robot.heading,
+                        "status": RobotStatus.WAITING.value,
+                        "path": remaining,
+                    }
+
+                # Congestion-aware reroute after threshold.
+                if (
+                    self._wait_counts[robot.id] >= _REROUTE_WAIT_THRESHOLD
+                    and self._planner is not None
+                    and self._grid is not None
+                ):
+                    congestion = self._traffic.get_congestion_map()
+                    planner = PathPlanner(self._grid, congestion=congestion)
+                    goal = path[-1]
+                    new_path = planner.find_path(
+                        (robot.grid_row, robot.grid_col), goal,
+                    )
+                    if new_path and len(new_path) > 1:
+                        await self._cache.set_path(robot.id, new_path[1:])
+                        logger.info(
+                            "Rerouted robot %s after %d waits",
+                            robot.id, self._wait_counts[robot.id],
+                        )
+                    self._wait_counts[robot.id] = 0
                 continue
+
+            # Successfully reserved — clear wait counter.
+            self._wait_counts.pop(robot.id, None)
 
             # Release the robot's previous cell.
             self._traffic.release_cell(robot.grid_row, robot.grid_col, robot.id)
@@ -92,18 +140,20 @@ class RobotSimulator:
                 robot.id, RobotStatus.MOVING.value
             )
 
-            # Collect for WS broadcast.
+            # Consume the waypoint.
+            remaining_path = path[1:]
+            await self._cache.set_path(robot.id, remaining_path)
+
+            # Collect for WS broadcast (include remaining path for frontend).
+            remaining_serialized = [[r, c] for r, c in remaining_path]
             position_updates[str(robot.id)] = {
                 "id": str(robot.id),
                 "row": target_row,
                 "col": target_col,
                 "heading": heading,
                 "status": RobotStatus.MOVING.value,
+                "path": remaining_serialized,
             }
-
-            # Consume the waypoint.
-            remaining_path = path[1:]
-            await self._cache.set_path(robot.id, remaining_path)
 
             # If path exhausted, robot has arrived.
             if not remaining_path:
@@ -116,10 +166,85 @@ class RobotSimulator:
                 # Emit arrival domain event based on destination cell type.
                 await self._emit_arrival_event(robot, target_row, target_col)
 
+        # ------------------------------------------------------------------
+        # Deadlock detection and resolution
+        # ------------------------------------------------------------------
+        deadlocked_ids = self._traffic.detect_deadlock(robots)
+        if deadlocked_ids:
+            logger.warning("Deadlock detected among robots: %s", deadlocked_ids)
+            await self._resolve_deadlock(robots, deadlocked_ids)
+
         # Broadcast position updates via WebSocket.
         if position_updates:
             from src.shared.websocket_manager import ws_manager
             await ws_manager.broadcast_robot_updates(position_updates)
+
+        # ------------------------------------------------------------------
+        # Periodic heatmap broadcast
+        # ------------------------------------------------------------------
+        if self._tick_counter % _HEATMAP_BROADCAST_INTERVAL == 0:
+            await self._broadcast_heatmap()
+
+    # ------------------------------------------------------------------
+    # Deadlock resolution
+    # ------------------------------------------------------------------
+
+    async def _resolve_deadlock(
+        self, robots: list, deadlocked_ids: list[uuid.UUID],
+    ) -> None:
+        """Clear and replan the path of the robot with the shortest remaining path."""
+        best_robot = None
+        best_path_len = float("inf")
+
+        robot_map = {r.id: r for r in robots}
+        for rid in deadlocked_ids:
+            robot = robot_map.get(rid)
+            if robot is None:
+                continue
+            path = await self._cache.get_path(rid)
+            if path and len(path) < best_path_len:
+                best_path_len = len(path)
+                best_robot = robot
+
+        if best_robot is None:
+            return
+
+        path = await self._cache.get_path(best_robot.id)
+        if not path:
+            return
+
+        goal = path[-1]
+        # Clear current path so the robot yields its next cell.
+        await self._cache.set_path(best_robot.id, [])
+        self._wait_counts.pop(best_robot.id, None)
+
+        # Attempt reroute with congestion awareness.
+        if self._grid is not None:
+            congestion = self._traffic.get_congestion_map()
+            planner = PathPlanner(self._grid, congestion=congestion)
+            new_path = planner.find_path(
+                (best_robot.grid_row, best_robot.grid_col), goal,
+            )
+            if new_path and len(new_path) > 1:
+                await self._cache.set_path(best_robot.id, new_path[1:])
+                logger.info(
+                    "Deadlock resolved: rerouted robot %s", best_robot.id,
+                )
+
+    # ------------------------------------------------------------------
+    # Heatmap broadcast
+    # ------------------------------------------------------------------
+
+    async def _broadcast_heatmap(self) -> None:
+        """Send the congestion map to all connected WS clients."""
+        congestion = self._traffic.get_congestion_map()
+        if not congestion:
+            return
+        serialized = {
+            f"{r},{c}": v for (r, c), v in congestion.items()
+        }
+        from src.shared.websocket_manager import ws_manager
+        await ws_manager.broadcast("heatmap.updated", {"cells": serialized})
 
     # ------------------------------------------------------------------
     # Arrival events
