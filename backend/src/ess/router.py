@@ -245,6 +245,7 @@ async def simulation_reset():
         await _engine.stop()
     _engine = None
     _simulator = None
+    simulation_state.auto_dispatch = False
     return {"status": "reset"}
 
 
@@ -268,6 +269,21 @@ async def simulation_apply_preset(body: PresetRequest, session: SessionDep):
         preset = SimulationPresets.get_preset(body.name)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    # Stop running simulation before applying a new preset.
+    global _engine, _simulator
+    if _engine is not None:
+        await _engine.stop()
+    _engine = None
+    _simulator = None
+    simulation_state.auto_dispatch = False
+
+    # Clear existing robots and zones to avoid UNIQUE constraint conflicts.
+    from src.ess.domain.models import Robot, Zone as ZoneModel
+    from sqlalchemy import delete
+    await session.execute(delete(Robot))
+    await session.execute(delete(ZoneModel))
+    await session.flush()
 
     zm = ZoneManager(session)
     zone_cfg = preset["zone"]
@@ -297,7 +313,31 @@ async def simulation_apply_preset(body: PresetRequest, session: SessionDep):
     for st in preset.get("stations", []):
         grid_config["stations"].append([st["row"], st["col"]])
 
+    # Extra wall cells from preset (bottleneck corridor, etc.).
+    for w in preset.get("walls", []):
+        grid_config["walls"].append(w)
+
+    # Rack blocks (crosstraffic preset).
+    for block in preset.get("rack_blocks", []):
+        r0, c0, sz = block["r0"], block["c0"], block["size"]
+        for dr in range(sz):
+            for dc in range(sz):
+                grid_config["racks"].append([r0 + dr, c0 + dc])
+
+    # Dense rack rows (dense preset).
+    dense = preset.get("dense_racks")
+    if dense:
+        for r in range(dense["start_row"], dense["end_row"], dense["row_step"]):
+            for dr in range(dense["rack_depth"]):
+                if r + dr < zone_cfg["rows"] - 1:
+                    for c in range(dense["col_start"], dense["col_end"]):
+                        if c % dense["vertical_aisle_every"] != 0:
+                            grid_config["racks"].append([r + dr, c])
+
     simulation_state.grid = await zm.build_grid(zone.id, grid_config)
+
+    # Set auto_dispatch flag from preset.
+    simulation_state.auto_dispatch = preset.get("auto_dispatch", False)
 
     # Register robots.
     fm = FleetManager(session)

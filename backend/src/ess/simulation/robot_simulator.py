@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import uuid
 
 from src.ess.application.fleet_manager import FleetManager
@@ -43,6 +44,8 @@ class RobotSimulator:
         self._planner = path_planner
         self._wait_counts: dict[uuid.UUID, int] = {}
         self._tick_counter: int = 0
+        self._floor_cells: list[tuple[int, int]] | None = None
+        self._robots: list | None = None  # Cached robot list (loaded once)
 
     async def update(self, dt: float) -> None:
         """Called once per simulation tick.
@@ -54,7 +57,16 @@ class RobotSimulator:
             interpolation weighting, currently one discrete step per tick).
         """
         self._tick_counter += 1
-        robots = await self._fleet.list_robots()
+        # Load robots once and cache; the DB session from the HTTP request
+        # is closed after the endpoint returns, so re-querying would reset
+        # in-memory position updates.
+        if self._robots is None:
+            self._robots = await self._fleet.list_robots()
+            # Reserve each robot's starting cell so the traffic controller
+            # correctly prevents collisions from tick one.
+            for r in self._robots:
+                self._traffic.reserve_cell(r.grid_row, r.grid_col, r.id)
+        robots = self._robots
         position_updates: dict[str, dict] = {}
 
         for robot in robots:
@@ -101,6 +113,9 @@ class RobotSimulator:
                     and self._grid is not None
                 ):
                     congestion = self._traffic.get_congestion_map()
+                    for cell, occupant in self._traffic.occupied_cells.items():
+                        if occupant != robot.id:
+                            congestion[cell] = congestion.get(cell, 0.0) + 50.0
                     planner = PathPlanner(self._grid, congestion=congestion)
                     goal = path[-1]
                     new_path = planner.find_path(
@@ -167,6 +182,29 @@ class RobotSimulator:
                 await self._emit_arrival_event(robot, target_row, target_col)
 
         # ------------------------------------------------------------------
+        # Auto-dispatch: assign random FLOOR destinations to IDLE robots
+        # ------------------------------------------------------------------
+        import src.shared.simulation_state as simulation_state
+
+        if simulation_state.auto_dispatch and self._grid:
+            for robot in robots:
+                path = await self._cache.get_path(robot.id)
+                if path or robot.status != RobotStatus.IDLE:
+                    continue
+                goal = self._random_floor_cell()
+                if goal and goal != (robot.grid_row, robot.grid_col):
+                    planner = PathPlanner(self._grid)
+                    new_path = planner.find_path(
+                        (robot.grid_row, robot.grid_col), goal,
+                    )
+                    if new_path and len(new_path) > 1:
+                        await self._cache.set_path(robot.id, new_path[1:])
+                        logger.debug(
+                            "Auto-dispatch robot %s -> (%d, %d)",
+                            robot.id, goal[0], goal[1],
+                        )
+
+        # ------------------------------------------------------------------
         # Deadlock detection and resolution
         # ------------------------------------------------------------------
         deadlocked_ids = self._traffic.detect_deadlock(robots)
@@ -184,6 +222,23 @@ class RobotSimulator:
         # ------------------------------------------------------------------
         if self._tick_counter % _HEATMAP_BROADCAST_INTERVAL == 0:
             await self._broadcast_heatmap()
+
+    # ------------------------------------------------------------------
+    # Auto-dispatch helpers
+    # ------------------------------------------------------------------
+
+    def _random_floor_cell(self) -> tuple[int, int] | None:
+        """Return a random FLOOR cell from the grid (cached)."""
+        if self._floor_cells is None and self._grid is not None:
+            self._floor_cells = [
+                (r, c)
+                for r in range(len(self._grid))
+                for c in range(len(self._grid[0]))
+                if self._grid[r][c] == CellType.FLOOR
+            ]
+        if not self._floor_cells:
+            return None
+        return random.choice(self._floor_cells)
 
     # ------------------------------------------------------------------
     # Deadlock resolution
@@ -214,21 +269,30 @@ class RobotSimulator:
             return
 
         goal = path[-1]
+        start = (best_robot.grid_row, best_robot.grid_col)
         # Clear current path so the robot yields its next cell.
         await self._cache.set_path(best_robot.id, [])
         self._wait_counts.pop(best_robot.id, None)
 
-        # Attempt reroute with congestion awareness.
+        # Attempt reroute: penalise currently occupied cells heavily so the
+        # planner steers around the deadlocked cluster.
         if self._grid is not None:
             congestion = self._traffic.get_congestion_map()
+            for cell, occupant in self._traffic.occupied_cells.items():
+                if occupant != best_robot.id:
+                    congestion[cell] = congestion.get(cell, 0.0) + 50.0
             planner = PathPlanner(self._grid, congestion=congestion)
-            new_path = planner.find_path(
-                (best_robot.grid_row, best_robot.grid_col), goal,
-            )
+            new_path = planner.find_path(start, goal)
             if new_path and len(new_path) > 1:
                 await self._cache.set_path(best_robot.id, new_path[1:])
                 logger.info(
                     "Deadlock resolved: rerouted robot %s", best_robot.id,
+                )
+            else:
+                # Reroute failed — mark robot IDLE so auto-dispatch can reassign.
+                best_robot.status = RobotStatus.IDLE
+                await self._cache.update_status(
+                    best_robot.id, RobotStatus.IDLE.value
                 )
 
     # ------------------------------------------------------------------

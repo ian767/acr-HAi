@@ -75,6 +75,63 @@ _PRESETS: dict[str, dict] = {
         "tick_interval_ms": 100,
         "speed": 2.0,
     },
+    "stress_bottleneck": {
+        "description": "Narrow corridor bottleneck: 25×40, 20 robots, wall with 2-cell gap",
+        "zone": {"name": "bottleneck", "rows": 25, "cols": 40},
+        "robots": {"a42td_count": 0, "k50h_count": 20},
+        "totes": 0,
+        "walls": [
+            [r, c]
+            for r in range(10, 13)
+            for c in range(1, 39)
+            if c not in (19, 20)
+        ],
+        "racks": {"rows": [], "cols": []},
+        "cantilevers": {},
+        "stations": [],
+        "tick_interval_ms": 100,
+        "speed": 1.0,
+        "auto_dispatch": True,
+    },
+    "stress_crosstraffic": {
+        "description": "Cross traffic: 30×30, 30 robots, 4 rack blocks + central cross aisle",
+        "zone": {"name": "crosstraffic", "rows": 30, "cols": 30},
+        "robots": {"a42td_count": 0, "k50h_count": 30},
+        "totes": 0,
+        "racks": {},
+        "rack_blocks": [
+            {"r0": 2, "c0": 2, "size": 7},
+            {"r0": 2, "c0": 21, "size": 7},
+            {"r0": 21, "c0": 2, "size": 7},
+            {"r0": 21, "c0": 21, "size": 7},
+        ],
+        "cantilevers": {},
+        "stations": [],
+        "tick_interval_ms": 100,
+        "speed": 1.0,
+        "auto_dispatch": True,
+    },
+    "stress_dense": {
+        "description": "High density: 40×60, 50 robots, rack rows + aisles",
+        "zone": {"name": "dense", "rows": 40, "cols": 60},
+        "robots": {"a42td_count": 0, "k50h_count": 50},
+        "totes": 0,
+        "racks": {},
+        "dense_racks": {
+            "start_row": 3,
+            "end_row": 37,
+            "row_step": 4,
+            "rack_depth": 2,
+            "col_start": 2,
+            "col_end": 58,
+            "vertical_aisle_every": 8,
+        },
+        "cantilevers": {},
+        "stations": [],
+        "tick_interval_ms": 80,
+        "speed": 1.0,
+        "auto_dispatch": True,
+    },
 }
 
 

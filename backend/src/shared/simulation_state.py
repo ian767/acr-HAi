@@ -7,10 +7,12 @@ from src.ess.domain.enums import CellType
 
 grid: list[list[CellType]] | None = None
 traffic: TrafficController = TrafficController()
+auto_dispatch: bool = False
 
 
 def reset() -> None:
     """Reset simulation state (for test isolation)."""
-    global grid, traffic
+    global grid, traffic, auto_dispatch
     grid = None
     traffic = TrafficController()
+    auto_dispatch = False
