@@ -1,0 +1,82 @@
+warehouse:
+  name: "ACR-Hai Demo Warehouse"
+
+zones:
+  - id: zone-1
+    name: "Zone A"
+    grid:
+      rows: 30
+      cols: 50
+    stations:
+      - name: "ST-A01"
+        position: { row: 0, col: 10 }
+        put_wall_slots: ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"]
+      - name: "ST-A02"
+        position: { row: 0, col: 20 }
+        put_wall_slots: ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"]
+      - name: "ST-A03"
+        position: { row: 0, col: 30 }
+        put_wall_slots: ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"]
+    racks:
+      - id: "RACK-A01"
+        position: { row: 5, col: 5 }
+        floors: 4
+        slots_per_floor: 6
+      - id: "RACK-A02"
+        position: { row: 5, col: 15 }
+        floors: 4
+        slots_per_floor: 6
+      - id: "RACK-A03"
+        position: { row: 5, col: 25 }
+        floors: 4
+        slots_per_floor: 6
+      - id: "RACK-A04"
+        position: { row: 10, col: 5 }
+        floors: 4
+        slots_per_floor: 6
+      - id: "RACK-A05"
+        position: { row: 10, col: 15 }
+        floors: 4
+        slots_per_floor: 6
+      - id: "RACK-A06"
+        position: { row: 10, col: 25 }
+        floors: 4
+        slots_per_floor: 6
+    cantilevers:
+      - position: { row: 3, col: 10 }
+      - position: { row: 3, col: 20 }
+      - position: { row: 3, col: 30 }
+    walls:
+      # Outer walls (simplified: top and bottom rows)
+      - from: { row: 0, col: 0 }
+        to: { row: 0, col: 49 }
+      - from: { row: 29, col: 0 }
+        to: { row: 29, col: 49 }
+    robots:
+      k50h:
+        count: 6
+        start_positions:
+          - { row: 1, col: 10 }
+          - { row: 1, col: 20 }
+          - { row: 1, col: 30 }
+          - { row: 2, col: 10 }
+          - { row: 2, col: 20 }
+          - { row: 2, col: 30 }
+      a42td:
+        count: 8
+        start_positions:
+          - { row: 15, col: 5 }
+          - { row: 15, col: 10 }
+          - { row: 15, col: 15 }
+          - { row: 15, col: 20 }
+          - { row: 20, col: 5 }
+          - { row: 20, col: 10 }
+          - { row: 20, col: 15 }
+          - { row: 20, col: 20 }
+
+simulation:
+  tick_interval_ms: 150
+  default_speed: 1.0
+  robot_speeds:
+    k50h: 1.5
+    a42td: 1.0

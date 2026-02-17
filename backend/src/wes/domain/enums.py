@@ -1,0 +1,33 @@
+import enum
+
+
+class OrderStatus(str, enum.Enum):
+    NEW = "NEW"
+    ALLOCATING = "ALLOCATING"
+    ALLOCATED = "ALLOCATED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class PickTaskState(str, enum.Enum):
+    SOURCE_REQUESTED = "SOURCE_REQUESTED"
+    SOURCE_AT_CANTILEVER = "SOURCE_AT_CANTILEVER"
+    SOURCE_AT_STATION = "SOURCE_AT_STATION"
+    PICKING = "PICKING"
+    RETURN_REQUESTED = "RETURN_REQUESTED"
+    RETURN_AT_CANTILEVER = "RETURN_AT_CANTILEVER"
+    COMPLETED = "COMPLETED"
+
+
+class StationStatus(str, enum.Enum):
+    IDLE = "IDLE"
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+
+
+class ToteStatus(str, enum.Enum):
+    STORED = "STORED"
+    IN_TRANSIT = "IN_TRANSIT"
+    AT_STATION = "AT_STATION"
+    RETURNING = "RETURNING"
