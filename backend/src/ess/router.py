@@ -113,25 +113,39 @@ async def get_grid(
 ):
     """Return the current grid state for a zone.
 
-    If no ``zone_id`` is supplied and a grid has been built (e.g. via a
-    simulation preset or seed), the cached grid is returned.
+    Returns cells as ``[{row, col, type}, ...]`` for non-FLOOR cells.
+    If a seeded/preset grid exists in ``simulation_state``, it takes precedence.
     """
+
+    def _grid_to_cells(grid_2d: list[list[CellType]], zid: str | None = None):
+        rows = len(grid_2d)
+        cols = len(grid_2d[0]) if rows > 0 else 0
+        cells = []
+        for r in range(rows):
+            for c in range(cols):
+                ct = grid_2d[r][c]
+                ct_val = ct.value if hasattr(ct, "value") else ct
+                if ct_val != "FLOOR":
+                    cells.append({"row": r, "col": c, "type": ct_val})
+        result: dict = {"rows": rows, "cols": cols, "cells": cells}
+        if zid is not None:
+            result["zone_id"] = zid
+        return result
+
+    # Prefer the seeded / preset grid when available.
+    if simulation_state.grid is not None:
+        return _grid_to_cells(
+            simulation_state.grid,
+            str(zone_id) if zone_id else None,
+        )
+
     if zone_id is not None:
         zm = ZoneManager(session)
         try:
             zone = await zm.get_zone(zone_id)
         except ValueError:
             raise HTTPException(status_code=404, detail="Zone not found")
-        # Return a blank grid when no config has been applied.
-        rows, cols = zone.grid_rows, zone.grid_cols
-        grid = [[CellType.FLOOR.value for _ in range(cols)] for _ in range(rows)]
-        return {"zone_id": str(zone_id), "rows": rows, "cols": cols, "cells": grid}
-
-    if simulation_state.grid is not None:
-        rows = len(simulation_state.grid)
-        cols = len(simulation_state.grid[0]) if rows > 0 else 0
-        cells = [[cell.value for cell in row] for row in simulation_state.grid]
-        return {"rows": rows, "cols": cols, "cells": cells}
+        return {"zone_id": str(zone_id), "rows": zone.grid_rows, "cols": zone.grid_cols, "cells": []}
 
     return {"rows": 0, "cols": 0, "cells": []}
 

@@ -82,6 +82,7 @@ export function useGrid(zoneId: string) {
   return useQuery({
     queryKey: ["grid", zoneId],
     queryFn: () => essApi.getGrid(zoneId),
+    enabled: !!zoneId,
     staleTime: 60_000,
   });
 }

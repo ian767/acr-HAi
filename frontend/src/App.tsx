@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
 import { lazy, Suspense } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WebSocketProvider } from "./websocket/WebSocketProvider";
 
 const DashboardPage = lazy(() => import("./features/dashboard/DashboardPage"));
@@ -89,23 +90,25 @@ function Loading() {
 export default function App() {
   return (
     <WebSocketProvider>
-      <div style={{ display: "flex", minHeight: "100vh" }}>
+      <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
         <Sidebar />
-        <main style={{ flex: 1, overflow: "auto" }}>
-          <Suspense fallback={<Loading />}>
-            <Routes>
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/wes/orders" element={<OrderManagementPage />} />
-              <Route path="/wes/stations" element={<StationManagementPage />} />
-              <Route path="/wes/pick-tasks" element={<PickTaskMonitorPage />} />
-              <Route path="/ess/map" element={<WarehouseMapPage />} />
-              <Route path="/ess/robots" element={<RobotFleetPage />} />
-              <Route path="/station/:id" element={<StationOperatorPage />} />
-              <Route path="/monitoring/alarms" element={<AlarmListPage />} />
-              <Route path="/monitoring/metrics" element={<MetricsPage />} />
-            </Routes>
-          </Suspense>
+        <main style={{ flex: 1, overflow: "auto", height: "100%" }}>
+          <ErrorBoundary>
+            <Suspense fallback={<Loading />}>
+              <Routes>
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/wes/orders" element={<OrderManagementPage />} />
+                <Route path="/wes/stations" element={<StationManagementPage />} />
+                <Route path="/wes/pick-tasks" element={<PickTaskMonitorPage />} />
+                <Route path="/ess/map" element={<WarehouseMapPage />} />
+                <Route path="/ess/robots" element={<RobotFleetPage />} />
+                <Route path="/station/:id" element={<StationOperatorPage />} />
+                <Route path="/monitoring/alarms" element={<AlarmListPage />} />
+                <Route path="/monitoring/metrics" element={<MetricsPage />} />
+              </Routes>
+            </Suspense>
+          </ErrorBoundary>
         </main>
       </div>
     </WebSocketProvider>

@@ -32,9 +32,9 @@ async def lifespan(app: FastAPI):
 
     # Event bus
     from src.shared.event_bus import event_bus
-    from src.event_handlers import register_handlers
+    from src.handlers import register_all_handlers
 
-    register_handlers(event_bus)
+    register_all_handlers(event_bus)
     await event_bus.start()
 
     yield

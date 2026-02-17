@@ -68,7 +68,7 @@ from src.main import app
 from src.shared.base_model import Base
 from src.seed import seed_database
 from src.shared.event_bus import event_bus
-from src.event_handlers import register_handlers
+from src.handlers import register_all_handlers
 import src.shared.simulation_state as simulation_state
 
 
@@ -99,7 +99,7 @@ async def setup():
             simulation_state.grid = grid
 
     # Start event bus
-    register_handlers(event_bus)
+    register_all_handlers(event_bus)
     await event_bus.start()
 
 
