@@ -65,6 +65,16 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
             ),
         ).order_by(EquipmentTask.created_at).limit(1)
 
+    # Guard: don't reassign a robot that still has active reservations
+    from src.ess.domain.models import Robot
+    robot = await session.get(Robot, robot_id)
+    if robot is not None and (robot.reserved or robot.hold_at_station):
+        logger.info(
+            "Retry skipped: robot %s still reserved (reserved=%s, hold=%s, station=%s)",
+            robot_id, robot.reserved, robot.hold_at_station, robot.reservation_station_id,
+        )
+        return
+
     result = await session.execute(stmt)
     eq_task = result.scalar_one_or_none()
     if eq_task is None:

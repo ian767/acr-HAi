@@ -77,13 +77,18 @@ class PickTaskOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CompleteBody(BaseModel):
+    pick_task_id: uuid.UUID
+
+
 class ScanBody(BaseModel):
     pick_task_id: uuid.UUID
 
 
 class BindToteBody(BaseModel):
     pick_task_id: uuid.UUID
-    target_tote_id: uuid.UUID
+    target_tote_id: uuid.UUID | None = None
+    target_tote_barcode: str | None = None
 
 
 class ToteFullBody(BaseModel):
@@ -93,11 +98,20 @@ class ToteFullBody(BaseModel):
 class InventoryOut(BaseModel):
     id: uuid.UUID
     sku: str
-    zone_id: uuid.UUID
+    sku_name: str | None = None
+    band: str = "C"
+    zone_id: uuid.UUID | None = None
     total_qty: int
     allocated_qty: int
 
     model_config = {"from_attributes": True}
+
+
+class CreateOrderBody(BaseModel):
+    sku: str
+    quantity: int = Field(ge=1)
+    priority: int = 0
+    external_id: str | None = None
 
 
 class ReleaseModeBody(BaseModel):
@@ -107,6 +121,56 @@ class ReleaseModeBody(BaseModel):
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
+
+
+@router.post("/orders", response_model=OrderOut, status_code=201)
+async def create_order(body: CreateOrderBody, session: SessionDep):
+    from sqlalchemy import select, func
+    from src.ess.domain.models import Tote
+    from src.shared import simulation_state
+
+    # Verify at least one tote exists with physical location and stock for this SKU
+    count = await session.execute(
+        select(func.count()).select_from(Tote).where(
+            Tote.sku == body.sku,
+            Tote.quantity > 0,
+            Tote.current_location_id.isnot(None),
+        )
+    )
+    if count.scalar_one() == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No fulfillable tote for SKU {body.sku}. "
+            "Apply a simulation preset so totes have physical map locations.",
+        )
+
+    svc = OrderService(session)
+    ext_id = body.external_id or f"ORD-{uuid.uuid4().hex[:8].upper()}"
+    order = await svc.create_order(
+        external_id=ext_id,
+        sku=body.sku,
+        quantity=body.quantity,
+        priority=body.priority,
+        zone_id=simulation_state.zone_id,
+    )
+
+    from src.shared.event_bus import event_bus
+    for evt in svc.collect_events():
+        await event_bus.publish(evt)
+
+    # Auto-allocate in interactive mode so robots get dispatched immediately.
+    if simulation_state.interactive_mode and simulation_state.zone_id is not None:
+        try:
+            order = await svc.allocate_order(order.id)
+            for evt in svc.collect_events():
+                await event_bus.publish(evt)
+        except (ValueError, RuntimeError) as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Auto-allocate failed for order %s: %s", order.id, exc
+            )
+
+    return order
 
 
 @router.get("/orders", response_model=list[OrderOut])
@@ -209,8 +273,48 @@ async def scan_item(
     body: ScanBody,
     session: SessionDep,
 ):
+    from src.wes.domain.models import Station
+    from src.ess.domain.models import Robot
+    from sqlalchemy import select
+
     svc = PickTaskService(session)
     try:
+        # Verify the pick task belongs to this station
+        task_check = await svc.get_pick_task(body.pick_task_id)
+        if task_check.station_id != station_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Pick task does not belong to this station",
+            )
+
+        # CV-1: Verify a robot holding this task's tote is at the station
+        station = await session.get(Station, station_id)
+        robot_present = False
+        if station is not None:
+            # Method 1: Check station.current_robot_id
+            if station.current_robot_id is not None:
+                robot = await session.get(Robot, station.current_robot_id)
+                if robot is not None and robot.hold_pick_task_id == body.pick_task_id:
+                    robot_present = True
+
+            # Method 2: Search for any robot reserved at this station with hold_at_station
+            if not robot_present:
+                result = await session.execute(
+                    select(Robot).where(
+                        Robot.hold_at_station == True,  # noqa: E712
+                        Robot.hold_pick_task_id == body.pick_task_id,
+                        Robot.reservation_station_id == station_id,
+                    ).limit(1)
+                )
+                if result.scalar_one_or_none() is not None:
+                    robot_present = True
+
+        if not robot_present:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot scan: no robot holding this task's tote is at the station",
+            )
+
         task = await svc.scan_item(body.pick_task_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -222,13 +326,132 @@ async def scan_item(
     return task
 
 
+@router.post("/stations/{station_id}/complete")
+async def complete_at_station(
+    station_id: uuid.UUID,
+    body: CompleteBody,
+    session: SessionDep,
+):
+    """Complete a pick task at station with CV-1 robot validation.
+
+    Validates:
+    1. A robot is present at the station (current_robot_id or fallback search)
+    2. Robot's reservation matches the station
+    3. Robot holds a tote at the station
+    4. Robot's held pick_task matches the request
+    """
+    from src.wes.application.reservation_service import ReservationService
+    from src.wes.application.station_queue_service import StationQueueService
+    from src.wes.application.order_service import OrderService
+    from src.wes.domain.enums import PickTaskState
+    from src.wes.domain.models import PickTask, Station
+    from src.ess.domain.models import Robot
+    from sqlalchemy import select
+
+    # Get station
+    station = await session.get(Station, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    # CV-1 validation: find robot at station
+    robot = None
+    if station.current_robot_id:
+        robot = await session.get(Robot, station.current_robot_id)
+
+    if robot is None:
+        # Fallback: search for reserved robot at station
+        rsvc = ReservationService(session)
+        robot = await rsvc.find_reserved_robot_at_station(station_id)
+
+    if robot is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No robot at station",
+        )
+
+    # Validate reservation matches
+    if robot.reservation_station_id != station_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Robot not reserved for this station",
+        )
+
+    if not robot.hold_at_station:
+        raise HTTPException(
+            status_code=400,
+            detail="Robot not holding tote at station",
+        )
+
+    if robot.hold_pick_task_id != body.pick_task_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Robot holding different pick task",
+        )
+
+    # All CV-1 checks passed - complete the pick task
+    pts = PickTaskService(session)
+    try:
+        task = await pts.complete_at_station(body.pick_task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Clear tote possession and release reservation
+    rsvc = ReservationService(session)
+    await rsvc.clear_reservation(robot.id)
+
+    # Release station slot and advance queue
+    qsvc = StationQueueService(session)
+    await qsvc.release_station(station_id, robot.id)
+
+    # Check if order is complete
+    pick_task = await pts.get_pick_task(body.pick_task_id)
+    result = await session.execute(
+        select(PickTask).where(
+            PickTask.order_id == pick_task.order_id,
+            PickTask.state != PickTaskState.COMPLETED,
+        )
+    )
+    incomplete = result.scalars().all()
+    if not incomplete:
+        os = OrderService(session)
+        await os.complete_order(pick_task.order_id)
+        from src.shared.event_bus import event_bus
+        for evt in os.collect_events():
+            await event_bus.publish(evt)
+
+    from src.shared.event_bus import event_bus
+    for evt in pts.collect_events():
+        await event_bus.publish(evt)
+
+    await session.commit()
+
+    from src.handler_support import ws_broadcast
+    await ws_broadcast("pickTask.state_changed", {
+        "pick_task_id": str(body.pick_task_id),
+        "order_id": str(pick_task.order_id),
+        "station_id": str(station_id),
+        "from": "SOURCE_AT_STATION",
+        "to": "COMPLETED",
+    })
+
+    return {
+        "status": "completed",
+        "pick_task_id": str(body.pick_task_id),
+        "robot_id": str(robot.id),
+    }
+
+
 @router.post("/stations/{station_id}/bind-tote", response_model=PickTaskOut)
 async def bind_target_tote(
     station_id: uuid.UUID,
     body: BindToteBody,
     session: SessionDep,
 ):
-    """Bind a target (destination) tote to a pick task at this station."""
+    """Bind a target (destination) tote to a pick task at this station.
+
+    Accepts either target_tote_id (UUID) or target_tote_barcode (string).
+    If barcode is provided, looks up the tote by barcode first.
+    """
     svc = PickTaskService(session)
     try:
         task = await svc.get_pick_task(body.pick_task_id)
@@ -241,7 +464,38 @@ async def bind_target_tote(
             detail="Pick task does not belong to this station",
         )
 
-    task.target_tote_id = body.target_tote_id
+    target_id = body.target_tote_id
+    if target_id is None and body.target_tote_barcode:
+        # Look up tote by barcode
+        from src.ess.domain.models import Tote
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Tote).where(
+                Tote.barcode == body.target_tote_barcode,
+            ).limit(1)
+        )
+        tote = result.scalar_one_or_none()
+        if tote is not None:
+            target_id = tote.id
+        else:
+            # Create a virtual tote for the barcode (simulation convenience)
+            tote = Tote(
+                barcode=body.target_tote_barcode,
+                sku=None,
+                quantity=0,
+            )
+            session.add(tote)
+            await session.flush()
+            target_id = tote.id
+
+    if target_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide target_tote_id or target_tote_barcode",
+        )
+
+    task.target_tote_id = target_id
     await session.commit()
     return task
 
@@ -287,6 +541,178 @@ async def list_inventory(
     repo = InventoryRepository(session)
     items = await repo.list(sku=sku, zone_id=zone_id, limit=limit, offset=offset)
     return list(items)
+
+
+@router.get("/inventory/skus")
+async def list_available_skus(session: SessionDep):
+    """Return distinct SKUs with available stock."""
+    repo = InventoryRepository(session)
+    items = await repo.list(limit=500)
+    skus = [
+        {"sku": inv.sku, "available_qty": inv.total_qty - inv.allocated_qty}
+        for inv in items
+        if inv.total_qty - inv.allocated_qty > 0
+    ]
+    return skus
+
+
+# ---------------------------------------------------------------------------
+# Totes (LPN-level detail)
+# ---------------------------------------------------------------------------
+
+
+class ToteDetailOut(BaseModel):
+    id: uuid.UUID
+    barcode: str
+    sku: str | None = None
+    sku_name: str | None = None
+    band: str | None = None
+    quantity: int
+    status: str
+    location_label: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/totes", response_model=list[ToteDetailOut])
+async def list_totes(
+    session: SessionDep,
+    sku: str | None = Query(None),
+    barcode: str | None = Query(None),
+    band: str | None = Query(None),
+    status: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List totes with inventory and location detail (LEFT JOIN)."""
+    from sqlalchemy import select
+    from src.ess.domain.models import Location, Tote
+    from src.wes.domain.models import Inventory
+
+    stmt = (
+        select(
+            Tote.id,
+            Tote.barcode,
+            Tote.sku,
+            Tote.quantity,
+            Tote.status,
+            Location.label.label("location_label"),
+            Inventory.sku_name,
+            Inventory.band,
+        )
+        .outerjoin(Location, Tote.current_location_id == Location.id)
+        .outerjoin(Inventory, Tote.sku == Inventory.sku)
+    )
+
+    if sku:
+        stmt = stmt.where(Tote.sku == sku)
+    if barcode:
+        stmt = stmt.where(Tote.barcode.ilike(f"%{barcode}%"))
+    if band:
+        stmt = stmt.where(Inventory.band == band)
+    if status:
+        stmt = stmt.where(Tote.status == status)
+
+    stmt = stmt.limit(limit).offset(offset)
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    return [
+        ToteDetailOut(
+            id=row.id,
+            barcode=row.barcode,
+            sku=row.sku,
+            sku_name=row.sku_name,
+            band=row.band,
+            quantity=row.quantity,
+            status=row.status.value if hasattr(row.status, "value") else str(row.status),
+            location_label=row.location_label,
+        )
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Inventory Seed
+# ---------------------------------------------------------------------------
+
+SKU_NAMES = [
+    "Widget Alpha", "Gizmo Beta", "Sprocket Gamma", "Flange Delta",
+    "Coupler Epsilon", "Bracket Zeta", "Gasket Eta", "Bearing Theta",
+    "Piston Iota", "Valve Kappa", "Nozzle Lambda", "Sleeve Mu",
+    "Collar Nu", "Bushing Xi", "Anchor Omicron", "Rivet Pi",
+    "Washer Rho", "Bolt Sigma", "Nut Tau", "Pin Upsilon",
+    "Cam Phi", "Gear Chi", "Shaft Psi", "Hub Omega",
+    "Drum Alpha-2", "Lever Beta-2", "Hinge Gamma-2", "Axle Delta-2",
+    "Spring Epsilon-2", "Clamp Zeta-2",
+]
+
+BANDS = ["A", "B", "C", "D", "E", "F"]
+
+SEED_PRESETS = {
+    "small":  {"sku_count": 5,  "totes_per_sku": 2, "qty_per_tote": 10},
+    "medium": {"sku_count": 15, "totes_per_sku": 4, "qty_per_tote": 10},
+    "large":  {"sku_count": 30, "totes_per_sku": 6, "qty_per_tote": 15},
+}
+
+
+class SeedRequest(BaseModel):
+    preset: str = "medium"
+
+
+@router.post("/inventory/seed")
+async def seed_inventory(body: SeedRequest, session: SessionDep):
+    """Seed standalone inventory (no zone required)."""
+    if body.preset not in SEED_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unknown preset: {body.preset}")
+
+    cfg = SEED_PRESETS[body.preset]
+    sku_count = cfg["sku_count"]
+    totes_per_sku = cfg["totes_per_sku"]
+    qty_per_tote = cfg["qty_per_tote"]
+
+    from sqlalchemy import delete
+    from src.ess.domain.models import Tote
+    from src.wes.domain.models import Inventory
+
+    # Clear existing totes and inventory.
+    await session.execute(delete(Inventory))
+    await session.execute(delete(Tote))
+    await session.flush()
+
+    totes_created = 0
+    for sku_num in range(1, sku_count + 1):
+        sku = f"SKU-{sku_num:03d}"
+        sku_name = SKU_NAMES[(sku_num - 1) % len(SKU_NAMES)]
+        band = BANDS[(sku_num - 1) % len(BANDS)]
+
+        for t in range(totes_per_sku):
+            tote = Tote(
+                barcode=f"SEED-{sku_num:03d}-{t+1:02d}",
+                sku=sku,
+                quantity=qty_per_tote,
+            )
+            session.add(tote)
+            totes_created += 1
+
+        inv = Inventory(
+            sku=sku,
+            sku_name=sku_name,
+            band=band,
+            zone_id=None,
+            total_qty=qty_per_tote * totes_per_sku,
+            allocated_qty=0,
+        )
+        session.add(inv)
+
+    await session.commit()
+
+    return {
+        "status": "seeded",
+        "preset": body.preset,
+        "sku_count": sku_count,
+        "totes_created": totes_created,
+    }
 
 
 # ---------------------------------------------------------------------------
