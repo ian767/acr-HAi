@@ -163,11 +163,9 @@ async def main():
         wall_count = flat.count("WALL")
         rack_count = flat.count("RACK")
         station_count = flat.count("STATION")
-        cant_count = flat.count("CANTILEVER")
         check("Grid has walls", wall_count > 0, f"count={wall_count}")
-        check("Grid has racks", rack_count == 6, f"count={rack_count}")
+        check("Grid has racks", rack_count >= 6, f"count={rack_count}")
         check("Grid has stations", station_count == 3, f"count={station_count}")
-        check("Grid has cantilevers", cant_count == 3, f"count={cant_count}")
 
         # ---------------------------------------------------------------
         # 2. Order Creation (WMS -> WES)

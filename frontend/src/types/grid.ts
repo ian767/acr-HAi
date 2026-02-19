@@ -1,7 +1,6 @@
 export type CellType =
   | "FLOOR"
   | "RACK"
-  | "CANTILEVER"
   | "STATION"
   | "AISLE"
   | "WALL"

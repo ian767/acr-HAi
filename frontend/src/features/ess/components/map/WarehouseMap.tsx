@@ -1,8 +1,10 @@
 import { useEffect, useRef, useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWarehouseStore } from "@/stores/useWarehouseStore";
 import type { RobotAnimation } from "@/stores/useWarehouseStore";
 import { useUiStore } from "@/stores/useUiStore";
 import { useGrid } from "@/api/hooks";
+import { essApi } from "@/api/ess";
 import type { RobotRealtime } from "@/types/robot";
 
 // ------------------------------------------------------------------ constants
@@ -13,7 +15,6 @@ const ANIMATION_DURATION_MS = 140;
 const CELL_COLORS: Record<string, string> = {
   FLOOR: "#1a1d27",
   RACK: "#4a5568",
-  CANTILEVER: "#eab308",
   STATION: "#3b82f6",
   AISLE: "#2d3148",
   WALL: "#111111",
@@ -33,10 +34,13 @@ function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
 
-function inferType(id: string): string {
-  const lower = id.toLowerCase();
-  if (lower.includes("k50")) return "K50H";
-  if (lower.includes("a42")) return "A42TD";
+function inferType(robot: RobotRealtime): string {
+  if (robot.type) return robot.type;
+  if (robot.name) {
+    const lower = robot.name.toLowerCase();
+    if (lower.includes("k50")) return "K50H";
+    if (lower.includes("a42")) return "A42TD";
+  }
   return "K50H";
 }
 
@@ -75,8 +79,61 @@ export function WarehouseMap() {
   const lastMouseRef = useRef({ x: 0, y: 0 });
   const dragStartRef = useRef({ x: 0, y: 0 });
 
+  // Editor drag-painting state
+  const paintingRef = useRef(false);
+  const lastPaintedRef = useRef<string | null>(null);
+
+  const queryClient = useQueryClient();
   const activeZoneId = useUiStore((s) => s.activeZoneId);
+  const editorMode = useUiStore((s) => s.editorMode);
   const { data: gridState, isLoading, error: gridError } = useGrid(activeZoneId ?? "");
+
+  // ------------------------------------------------------------ helpers
+
+  /** Convert screen (client) coordinates to grid row/col. */
+  const screenToGrid = useCallback(
+    (clientX: number, clientY: number): { row: number; col: number } | null => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return null;
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+      const zoom = zoomRef.current;
+      const pan = panRef.current;
+      const worldX = (screenX - pan.x) / zoom;
+      const worldY = (screenY - pan.y) / zoom;
+      const col = Math.floor(worldX / CELL_SIZE);
+      const row = Math.floor(worldY / CELL_SIZE);
+      return { row, col };
+    },
+    [],
+  );
+
+  /** Paint a single cell: optimistic cache update + fire-and-forget API call. */
+  const paintCell = useCallback(
+    (row: number, col: number, cellType: string) => {
+      if (!activeZoneId) return;
+
+      // Optimistic cache update
+      queryClient.setQueryData(
+        ["grid", activeZoneId],
+        (old: any) => {
+          if (!old) return old;
+          // Remove existing cell at this position, then add new one (if not FLOOR)
+          const filtered = old.cells.filter(
+            (c: any) => !(c.row === row && c.col === col),
+          );
+          if (cellType !== "FLOOR") {
+            filtered.push({ row, col, type: cellType });
+          }
+          return { ...old, cells: filtered };
+        },
+      );
+
+      // Fire-and-forget API call
+      essApi.gridUpdateCell(row, col, cellType);
+    },
+    [activeZoneId, queryClient],
+  );
 
   // ------------------------------------------------------------ drawing
 
@@ -115,6 +172,25 @@ export function WarehouseMap() {
           const cellType = cellMap.get(`${r},${c}`) ?? "FLOOR";
           ctx.fillStyle = CELL_COLORS[cellType] ?? CELL_COLORS.FLOOR ?? "#1a1d27";
           ctx.fillRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
+        }
+      }
+
+      // ---- Editor grid lines ----
+      const { editorMode: isEditing } = useUiStore.getState();
+      if (isEditing) {
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.lineWidth = 0.5;
+        for (let r = 0; r <= rows; r++) {
+          ctx.beginPath();
+          ctx.moveTo(0, r * CELL_SIZE);
+          ctx.lineTo(cols * CELL_SIZE, r * CELL_SIZE);
+          ctx.stroke();
+        }
+        for (let c = 0; c <= cols; c++) {
+          ctx.beginPath();
+          ctx.moveTo(c * CELL_SIZE, 0);
+          ctx.lineTo(c * CELL_SIZE, rows * CELL_SIZE);
+          ctx.stroke();
         }
       }
 
@@ -186,7 +262,7 @@ export function WarehouseMap() {
       const anim = robotAnimations[id];
       const pos = interpolateRobot(robot, anim, now);
       const { x, y } = pos;
-      const color = ROBOT_COLORS[inferType(id)] ?? "#9ca3af";
+      const color = ROBOT_COLORS[inferType(robot)] ?? "#9ca3af";
       const isSelected = id === selectedRobotId;
 
       // WAITING / BLOCKED pulse ring
@@ -238,7 +314,7 @@ export function WarehouseMap() {
       ctx.fillStyle = "#ffffff";
       ctx.font = "8px monospace";
       ctx.textAlign = "center";
-      ctx.fillText(id.slice(0, 6), x, y + 14);
+      ctx.fillText(robot.name ?? id.slice(0, 6), x, y + 14);
     }
 
     ctx.restore();
@@ -282,21 +358,61 @@ export function WarehouseMap() {
   }, []);
 
   const handlePointerDown = useCallback((e: PointerEvent) => {
+    const { editorMode: isEditing, editorTool } = useUiStore.getState();
+
+    if (isEditing && e.button === 0) {
+      // Editor mode: left click starts painting
+      paintingRef.current = true;
+      lastPaintedRef.current = null;
+
+      const cell = screenToGrid(e.clientX, e.clientY);
+      if (cell && cell.row >= 0 && cell.col >= 0) {
+        const key = `${cell.row},${cell.col}`;
+        paintCell(cell.row, cell.col, editorTool);
+        lastPaintedRef.current = key;
+      }
+      return;
+    }
+
+    // Middle click always pans (in editor or normal mode)
+    // Left click pans only in normal mode
     if (e.button === 0 || e.button === 1) {
       draggingRef.current = true;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
       dragStartRef.current = { x: e.clientX, y: e.clientY };
     }
-  }, []);
+  }, [screenToGrid, paintCell]);
 
   const handlePointerMove = useCallback((e: PointerEvent) => {
+    // Editor drag painting
+    if (paintingRef.current) {
+      const { editorTool } = useUiStore.getState();
+      const cell = screenToGrid(e.clientX, e.clientY);
+      if (cell && cell.row >= 0 && cell.col >= 0) {
+        const key = `${cell.row},${cell.col}`;
+        if (key !== lastPaintedRef.current) {
+          paintCell(cell.row, cell.col, editorTool);
+          lastPaintedRef.current = key;
+        }
+      }
+      return;
+    }
+
+    // Normal panning
     if (!draggingRef.current) return;
     panRef.current.x += e.clientX - lastMouseRef.current.x;
     panRef.current.y += e.clientY - lastMouseRef.current.y;
     lastMouseRef.current = { x: e.clientX, y: e.clientY };
-  }, []);
+  }, [screenToGrid, paintCell]);
 
   const handlePointerUp = useCallback((e: PointerEvent) => {
+    // End editor painting
+    if (paintingRef.current) {
+      paintingRef.current = false;
+      lastPaintedRef.current = null;
+      return;
+    }
+
     if (!draggingRef.current) {
       draggingRef.current = false;
       return;
@@ -308,17 +424,16 @@ export function WarehouseMap() {
     const dy = e.clientY - dragStartRef.current.y;
     if (Math.sqrt(dx * dx + dy * dy) >= 3) return;
 
-    // Convert screen coords to grid coords
+    // Hit-test robots (10px radius)
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
     const zoom = zoomRef.current;
     const pan = panRef.current;
-    const worldX = (screenX - pan.x) / zoom;
-    const worldY = (screenY - pan.y) / zoom;
+    const wx = (screenX - pan.x) / zoom;
+    const wy = (screenY - pan.y) / zoom;
 
-    // Hit-test robots (10px radius)
     const { robots } = useWarehouseStore.getState();
     let closestId: string | null = null;
     let closestDist = 10 / zoom; // 10px in screen space
@@ -326,7 +441,7 @@ export function WarehouseMap() {
     for (const [id, robot] of Object.entries(robots)) {
       const rx = robot.col * CELL_SIZE + CELL_SIZE / 2;
       const ry = robot.row * CELL_SIZE + CELL_SIZE / 2;
-      const dist = Math.sqrt((worldX - rx) ** 2 + (worldY - ry) ** 2);
+      const dist = Math.sqrt((wx - rx) ** 2 + (wy - ry) ** 2);
       if (dist < closestDist) {
         closestDist = dist;
         closestId = id;
@@ -334,7 +449,7 @@ export function WarehouseMap() {
     }
 
     useUiStore.getState().selectRobot(closestId);
-  }, []);
+  }, [screenToGrid]);
 
   // ------------------------------------------------------------ lifecycle
 
@@ -386,7 +501,7 @@ export function WarehouseMap() {
         height: "100%",
         overflow: "hidden",
         position: "relative",
-        cursor: draggingRef.current ? "grabbing" : "grab",
+        cursor: editorMode ? "crosshair" : draggingRef.current ? "grabbing" : "grab",
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />

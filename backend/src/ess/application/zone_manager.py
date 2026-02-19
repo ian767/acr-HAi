@@ -66,7 +66,7 @@ class ZoneManager:
         _TYPE_KEYS: dict[str, CellType] = {
             "walls": CellType.WALL,
             "racks": CellType.RACK,
-            "cantilevers": CellType.CANTILEVER,
+            "cantilevers": CellType.RACK,
             "stations": CellType.STATION,
             "aisles": CellType.AISLE,
             "charging": CellType.CHARGING,

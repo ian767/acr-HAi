@@ -3,9 +3,58 @@
 from __future__ import annotations
 
 
+def _build_queue_cells(station_row: int, station_col: int, queue_size: int = 3) -> dict:
+    """Generate approach, holding, and queue cell positions for a station.
+
+    Layout (going upward from station):
+    station(row, col) -> approach(row-1, col) -> Q1(row-2, col) -> Q2(row-3, col) -> holding(row-4, col)
+    """
+    approach_row = station_row - 1
+    queue_cells = []
+    for i in range(queue_size):
+        queue_cells.append({
+            "position": i,
+            "row": station_row - 2 - i,
+            "col": station_col,
+        })
+    holding_row = station_row - 2 - queue_size
+
+    return {
+        "approach_cell": {"row": approach_row, "col": station_col},
+        "holding_cell": {"row": holding_row, "col": station_col},
+        "queue_cells": queue_cells,
+    }
+
+
 _PRESETS: dict[str, dict] = {
+    "interactive": {
+        "description": "Minimal setup for manual operation: 1 K50H, 1 A42TD, 1 station",
+        "zone": {"name": "interactive", "rows": 15, "cols": 20},
+        "robots": {
+            "a42td_count": 1,
+            "k50h_count": 1,
+        },
+        "totes": 10,
+        "racks": {
+            "rows": range(2, 8),
+            "cols": range(2, 8),
+        },
+        "rack_edge_row": 7,
+        "stations": [
+            {"row": 13, "col": 5, **_build_queue_cells(13, 5, queue_size=2)},
+        ],
+        "tick_interval_ms": 150,
+        "speed": 1.0,
+        "wes_driven": True,
+        "auto_dispatch": False,
+        "orders_per_minute": 0,
+        "station_processing_ticks": 0,
+        "sku_count": 5,
+        "totes_per_rack_slot": 1,
+        "interactive_mode": True,
+    },
     "demo_small": {
-        "description": "Small demo with 5 robots and 20 totes",
+        "description": "Small WES demo with 5 robots and 20 totes",
         "zone": {"name": "demo", "rows": 20, "cols": 30},
         "robots": {
             "a42td_count": 3,
@@ -13,22 +62,26 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 20,
         "racks": {
-            "rows": range(2, 8),
+            "rows": range(2, 10),
             "cols": range(2, 12),
         },
-        "cantilevers": {
-            "row": 9,
-            "cols": range(2, 12),
-        },
+        "rack_edge_row": 9,
         "stations": [
-            {"row": 18, "col": 5},
-            {"row": 18, "col": 10},
+            {"row": 18, "col": 5, **_build_queue_cells(18, 5, queue_size=3)},
+            {"row": 18, "col": 10, **_build_queue_cells(18, 10, queue_size=3)},
         ],
         "tick_interval_ms": 150,
         "speed": 1.0,
+        # WES-driven simulation
+        "wes_driven": True,
+        "auto_dispatch": False,
+        "orders_per_minute": 4.0,
+        "station_processing_ticks": 5,
+        "sku_count": 10,
+        "totes_per_rack_slot": 1,
     },
     "demo_medium": {
-        "description": "Medium demo with 20 robots and 100 totes",
+        "description": "Medium WES demo with 20 robots and 100 totes",
         "zone": {"name": "medium", "rows": 40, "cols": 60},
         "robots": {
             "a42td_count": 12,
@@ -36,21 +89,25 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 100,
         "racks": {
-            "rows": range(2, 16),
+            "rows": range(2, 18),
             "cols": range(2, 28),
         },
-        "cantilevers": {
-            "row": 17,
-            "cols": range(2, 28),
-        },
+        "rack_edge_row": 17,
         "stations": [
-            {"row": 35, "col": 10},
-            {"row": 35, "col": 20},
-            {"row": 35, "col": 30},
-            {"row": 35, "col": 40},
+            {"row": 35, "col": 10, **_build_queue_cells(35, 10, queue_size=3)},
+            {"row": 35, "col": 20, **_build_queue_cells(35, 20, queue_size=3)},
+            {"row": 35, "col": 30, **_build_queue_cells(35, 30, queue_size=3)},
+            {"row": 35, "col": 40, **_build_queue_cells(35, 40, queue_size=3)},
         ],
         "tick_interval_ms": 150,
         "speed": 1.0,
+        # WES-driven simulation
+        "wes_driven": True,
+        "auto_dispatch": False,
+        "orders_per_minute": 6.0,
+        "station_processing_ticks": 5,
+        "sku_count": 20,
+        "totes_per_rack_slot": 1,
     },
     "stress_test": {
         "description": "Stress test with 100 robots and 500 totes",
@@ -61,15 +118,12 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 500,
         "racks": {
-            "rows": range(2, 30),
+            "rows": range(2, 32),
             "cols": range(2, 50),
         },
-        "cantilevers": {
-            "row": 31,
-            "cols": range(2, 50),
-        },
+        "rack_edge_row": 31,
         "stations": [
-            {"row": 70, "col": c}
+            {"row": 70, "col": c, **_build_queue_cells(70, c, queue_size=4)}
             for c in range(10, 110, 10)
         ],
         "tick_interval_ms": 100,
@@ -87,7 +141,6 @@ _PRESETS: dict[str, dict] = {
             if c not in (19, 20)
         ],
         "racks": {"rows": [], "cols": []},
-        "cantilevers": {},
         "stations": [],
         "tick_interval_ms": 100,
         "speed": 1.0,
@@ -105,7 +158,6 @@ _PRESETS: dict[str, dict] = {
             {"r0": 21, "c0": 2, "size": 7},
             {"r0": 21, "c0": 21, "size": 7},
         ],
-        "cantilevers": {},
         "stations": [],
         "tick_interval_ms": 100,
         "speed": 1.0,
@@ -126,7 +178,6 @@ _PRESETS: dict[str, dict] = {
             "col_end": 58,
             "vertical_aisle_every": 8,
         },
-        "cantilevers": {},
         "stations": [],
         "tick_interval_ms": 80,
         "speed": 1.0,

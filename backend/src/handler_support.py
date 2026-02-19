@@ -48,6 +48,22 @@ class HandlerServices:
 # Path planning + Redis storage
 # ---------------------------------------------------------------------------
 
+async def get_robot_position(robot_id: Any) -> tuple[int, int] | None:
+    """Read current robot position from Redis (simulation state).
+
+    Falls back to None if not cached yet.
+    """
+    from src.ess.infrastructure.redis_cache import RobotStateCache
+    from src.shared.redis import get_redis
+
+    redis_client = await get_redis()
+    cache = RobotStateCache(redis_client)
+    state = await cache.get_state(robot_id)
+    if state and ("row" in state or "col" in state):
+        return (state["row"], state["col"])
+    return None
+
+
 async def plan_and_store_path(
     services: HandlerServices,
     robot_id: Any,
@@ -65,6 +81,45 @@ async def plan_and_store_path(
         await cache.set_path(robot_id, path[1:])  # skip current position
         return path[1:]
     return None
+
+
+def find_nearest_rack_edge(grid: list[list] | None, from_row: int, from_col: int) -> tuple[int, int] | None:
+    """Return the nearest rack-edge RACK cell to (from_row, from_col).
+
+    Uses ``simulation_state.rack_edge_row`` to identify which row of RACK
+    cells serves as the handoff point. Falls back to the largest-row RACK
+    cell if rack_edge_row is not set.
+    """
+    if grid is None:
+        return None
+    from src.ess.domain.enums import CellType
+    import src.shared.simulation_state as simulation_state
+
+    best: tuple[int, int] | None = None
+    best_dist = float("inf")
+
+    if simulation_state.rack_edge_row is not None:
+        edge_row = simulation_state.rack_edge_row
+        for c in range(len(grid[0])):
+            if edge_row < len(grid) and grid[edge_row][c] == CellType.RACK:
+                dist = abs(edge_row - from_row) + abs(c - from_col)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = (edge_row, c)
+
+    # Fallback: bottom-most RACK row.
+    if best is None:
+        for r in range(len(grid) - 1, -1, -1):
+            for c in range(len(grid[0])):
+                if grid[r][c] == CellType.RACK:
+                    dist = abs(r - from_row) + abs(c - from_col)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best = (r, c)
+            if best is not None:
+                break
+
+    return best
 
 
 # ---------------------------------------------------------------------------

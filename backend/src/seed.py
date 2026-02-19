@@ -227,11 +227,11 @@ async def seed_database(session: AsyncSession) -> list[list[CellType]] | None:
         if 0 <= r < rows and 0 <= c < cols:
             grid[r][c] = CellType.RACK
 
-    # Cantilevers
+    # Cantilevers (legacy: treated as RACK cells)
     for cant_cfg in zone_cfg.get("cantilevers", []):
         r, c = cant_cfg["position"]["row"], cant_cfg["position"]["col"]
         if 0 <= r < rows and 0 <= c < cols:
-            grid[r][c] = CellType.CANTILEVER
+            grid[r][c] = CellType.RACK
 
     # Stations
     for st_cfg in zone_cfg.get("stations", []):

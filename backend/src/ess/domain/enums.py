@@ -11,7 +11,8 @@ class RobotStatus(str, enum.Enum):
     ASSIGNED = "ASSIGNED"
     MOVING = "MOVING"
     WAITING = "WAITING"
-    DOCKING = "DOCKING"
+    WAITING_FOR_STATION = "WAITING_FOR_STATION"
+    DWELLING = "DWELLING"
     BLOCKED = "BLOCKED"
     CHARGING = "CHARGING"
 
@@ -19,7 +20,6 @@ class RobotStatus(str, enum.Enum):
 class CellType(str, enum.Enum):
     FLOOR = "FLOOR"
     RACK = "RACK"
-    CANTILEVER = "CANTILEVER"
     STATION = "STATION"
     AISLE = "AISLE"
     WALL = "WALL"

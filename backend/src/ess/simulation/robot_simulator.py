@@ -46,6 +46,8 @@ class RobotSimulator:
         self._tick_counter: int = 0
         self._floor_cells: list[tuple[int, int]] | None = None
         self._robots: list | None = None  # Cached robot list (loaded once)
+        # Per-robot movement cooldown accumulator (seconds).
+        self._move_cooldowns: dict[uuid.UUID, float] = {}
 
     async def update(self, dt: float) -> None:
         """Called once per simulation tick.
@@ -69,11 +71,41 @@ class RobotSimulator:
         robots = self._robots
         position_updates: dict[str, dict] = {}
 
+        import src.shared.simulation_state as simulation_state
+        speed_cfg = simulation_state.robot_speed
+
         for robot in robots:
+            # Skip robots waiting at station UNLESS they now have a path
+            # (meaning the return flow has started and released them).
+            if robot.status == RobotStatus.WAITING_FOR_STATION:
+                path = await self._cache.get_path(robot.id)
+                if path:
+                    # Return flow started — sync in-memory status to ASSIGNED
+                    robot.status = RobotStatus.MOVING
+                    robot.hold_at_station = False  # type: ignore[attr-defined]
+                    logger.info(
+                        "K50H %s released from WAITING_FOR_STATION (return path found)",
+                        robot.id,
+                    )
+                else:
+                    continue
+
             path = await self._cache.get_path(robot.id)
             if not path:
                 robot._next_cell = None  # type: ignore[attr-defined]
                 continue
+
+            # Movement cooldown: accumulate dt, only move when threshold met.
+            robot_type = robot.type.value if hasattr(robot.type, "value") else str(robot.type)
+            move_interval = speed_cfg.get(robot_type, 0.3)
+            self._move_cooldowns[robot.id] = self._move_cooldowns.get(robot.id, 0.0) + dt
+            if self._move_cooldowns[robot.id] < move_interval:
+                # Not enough time accumulated — robot stays put this tick.
+                # Still set _next_cell for deadlock detection.
+                robot._next_cell = path[0]  # type: ignore[attr-defined]
+                continue
+            # Consume one move's worth of cooldown.
+            self._move_cooldowns[robot.id] -= move_interval
 
             next_cell = path[0]
             target_row, target_col = next_cell
@@ -99,6 +131,8 @@ class RobotSimulator:
                     remaining = [[r, c] for r, c in path]
                     position_updates[str(robot.id)] = {
                         "id": str(robot.id),
+                        "name": robot.name,
+                        "type": robot.type.value if hasattr(robot.type, "value") else str(robot.type),
                         "row": robot.grid_row,
                         "col": robot.grid_col,
                         "heading": robot.heading,
@@ -163,12 +197,23 @@ class RobotSimulator:
             remaining_serialized = [[r, c] for r, c in remaining_path]
             position_updates[str(robot.id)] = {
                 "id": str(robot.id),
+                "name": robot.name,
+                "type": robot.type.value if hasattr(robot.type, "value") else str(robot.type),
                 "row": target_row,
                 "col": target_col,
                 "heading": heading,
                 "status": RobotStatus.MOVING.value,
                 "path": remaining_serialized,
             }
+
+            # Broadcast robot.move_started event
+            from src.shared.websocket_manager import ws_manager
+            await ws_manager.broadcast("robot.move_started", {
+                "type": "robot.move_started",
+                "robotId": str(robot.id),
+                "from": [robot.grid_row, robot.grid_col],
+                "to": [target_row, target_col],
+            })
 
             # If path exhausted, robot has arrived.
             if not remaining_path:
@@ -178,15 +223,37 @@ class RobotSimulator:
                 )
                 position_updates[str(robot.id)]["status"] = RobotStatus.IDLE.value
 
+                # Broadcast robot.target_reached
+                await ws_manager.broadcast("robot.target_reached", {
+                    "type": "robot.target_reached",
+                    "robotId": str(robot.id),
+                    "position": [target_row, target_col],
+                })
+
                 # Emit arrival domain event based on destination cell type.
                 await self._emit_arrival_event(robot, target_row, target_col)
 
+                # If the robot is still idle at a non-FLOOR cell (cantilever,
+                # station, rack), park it on the nearest FLOOR cell so it
+                # doesn't block other robots trying to reach that cell.
+                # But skip parking if robot is WAITING_FOR_STATION (holding tote)
+                new_path = await self._cache.get_path(robot.id)
+                if not new_path and self._grid is not None and robot.status != RobotStatus.WAITING_FOR_STATION:
+                    cell = self._grid[target_row][target_col]
+                    if cell in (CellType.STATION, CellType.RACK):
+                        await self._park_to_floor(robot, target_row, target_col)
+
         # ------------------------------------------------------------------
         # Auto-dispatch: assign random FLOOR destinations to IDLE robots
+        # (skipped when WES-driven mode is active — robots receive paths
+        # exclusively from the event handler chain)
         # ------------------------------------------------------------------
-        import src.shared.simulation_state as simulation_state
-
-        if simulation_state.auto_dispatch and self._grid:
+        if (
+            simulation_state.auto_dispatch
+            and not simulation_state.wes_driven
+            and not simulation_state.interactive_mode
+            and self._grid
+        ):
             for robot in robots:
                 path = await self._cache.get_path(robot.id)
                 if path or robot.status != RobotStatus.IDLE:
@@ -325,7 +392,7 @@ class RobotSimulator:
             return
 
         cell_type = self._grid[target_row][target_col]
-        if cell_type not in (CellType.CANTILEVER, CellType.STATION, CellType.RACK):
+        if cell_type not in (CellType.STATION, CellType.RACK):
             return
 
         # Look up the EquipmentTask assigned to this robot.
@@ -359,23 +426,29 @@ class RobotSimulator:
                 return
 
             from src.shared.event_bus import event_bus
+            import src.shared.simulation_state as sim_state
 
-            if cell_type == CellType.CANTILEVER:
-                if eq_task.type == EquipmentTaskType.RETRIEVE:
-                    from src.ess.domain.events import SourceAtCantilever
-                    await event_bus.publish(SourceAtCantilever(
+            if cell_type == CellType.STATION:
+                # K50H arriving at station with tote
+                # First emit SourcePicked (tote was picked at cantilever),
+                # then SourceAtStation
+                from src.ess.domain.events import SourcePicked, SourceAtStation
+
+                # Emit SourcePicked if pick task is in SOURCE_AT_CANTILEVER state
+                from src.wes.domain.enums import PickTaskState
+                if pick_task.state == PickTaskState.SOURCE_AT_CANTILEVER:
+                    await event_bus.publish(SourcePicked(
                         pick_task_id=eq_task.pick_task_id,
                         tote_id=tote_id,
-                    ))
-                elif eq_task.type == EquipmentTaskType.RETURN:
-                    from src.ess.domain.events import ReturnAtCantilever
-                    await event_bus.publish(ReturnAtCantilever(
-                        pick_task_id=eq_task.pick_task_id,
-                        tote_id=tote_id,
+                        robot_id=robot.id,
                     ))
 
-            elif cell_type == CellType.STATION:
-                from src.ess.domain.events import SourceAtStation
+                # Set robot to WAITING_FOR_STATION (holds tote, stays at station)
+                robot.status = RobotStatus.WAITING_FOR_STATION
+                await self._cache.update_status(
+                    robot.id, RobotStatus.WAITING_FOR_STATION.value
+                )
+
                 await event_bus.publish(SourceAtStation(
                     pick_task_id=eq_task.pick_task_id,
                     tote_id=tote_id,
@@ -383,19 +456,116 @@ class RobotSimulator:
                 ))
 
             elif cell_type == CellType.RACK:
-                from src.ess.domain.events import SourceBackInRack
-                if eq_task.target_location_id is not None:
-                    await event_bus.publish(SourceBackInRack(
-                        pick_task_id=eq_task.pick_task_id,
-                        tote_id=tote_id,
-                        location_id=eq_task.target_location_id,
-                    ))
-                elif eq_task.source_location_id is not None:
-                    await event_bus.publish(SourceBackInRack(
-                        pick_task_id=eq_task.pick_task_id,
-                        tote_id=tote_id,
-                        location_id=eq_task.source_location_id,
-                    ))
+                is_edge = (
+                    sim_state.rack_edge_row is not None
+                    and target_row == sim_state.rack_edge_row
+                )
+
+                if eq_task.type == EquipmentTaskType.RETRIEVE:
+                    if is_edge:
+                        # A42TD arrived at rack-edge (handoff point) with tote.
+                        from src.ess.domain.events import SourceAtCantilever
+                        await event_bus.publish(SourceAtCantilever(
+                            pick_task_id=eq_task.pick_task_id,
+                            tote_id=tote_id,
+                        ))
+                    else:
+                        # A42TD arrived at deep rack — dispatch to rack-edge.
+                        await self._dispatch_to_rack_edge(robot, target_row, target_col)
+                elif eq_task.type == EquipmentTaskType.RETURN:
+                    if is_edge:
+                        # K50H/A42TD arrived at rack-edge for return handoff.
+                        from src.ess.domain.events import ReturnAtCantilever
+                        await event_bus.publish(ReturnAtCantilever(
+                            pick_task_id=eq_task.pick_task_id,
+                            tote_id=tote_id,
+                        ))
+                    else:
+                        # A42TD returning tote to its deep rack location — fire completion.
+                        from src.ess.domain.events import SourceBackInRack
+                        loc_id = eq_task.target_location_id or eq_task.source_location_id
+                        if loc_id is not None:
+                            await event_bus.publish(SourceBackInRack(
+                                pick_task_id=eq_task.pick_task_id,
+                                tote_id=tote_id,
+                                location_id=loc_id,
+                            ))
+
+    async def _dispatch_to_rack_edge(
+        self, robot, from_row: int, from_col: int
+    ) -> None:
+        """Plan A42TD path from deep rack to nearest rack-edge cell."""
+        if self._grid is None:
+            return
+
+        import src.shared.simulation_state as sim_state
+
+        # Find the nearest RACK cell on the rack_edge_row.
+        best: tuple[int, int] | None = None
+        best_dist = float("inf")
+
+        if sim_state.rack_edge_row is not None:
+            edge_row = sim_state.rack_edge_row
+            for c in range(len(self._grid[0])):
+                if edge_row < len(self._grid) and self._grid[edge_row][c] == CellType.RACK:
+                    dist = abs(edge_row - from_row) + abs(c - from_col)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best = (edge_row, c)
+
+        # Fallback: find the RACK cell with the largest row number (bottom edge).
+        if best is None:
+            for r in range(len(self._grid) - 1, -1, -1):
+                for c in range(len(self._grid[0])):
+                    if self._grid[r][c] == CellType.RACK:
+                        dist = abs(r - from_row) + abs(c - from_col)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best = (r, c)
+                if best is not None:
+                    break
+
+        if best is None:
+            logger.warning("No rack-edge cell found for A42TD dispatch")
+            return
+
+        from src.ess.application.path_planner import PathPlanner
+        planner = PathPlanner(self._grid)
+        path = planner.find_path((from_row, from_col), best)
+        if path and len(path) > 1:
+            await self._cache.set_path(robot.id, path[1:])
+            logger.info(
+                "A42TD %s dispatched from rack (%d,%d) to rack-edge (%d,%d)",
+                robot.id, from_row, from_col, best[0], best[1],
+            )
+
+    # ------------------------------------------------------------------
+    # Idle parking
+    # ------------------------------------------------------------------
+
+    async def _park_to_floor(
+        self, robot, from_row: int, from_col: int,
+    ) -> None:
+        """Move an idle robot off a key cell to the nearest FLOOR cell."""
+        if self._grid is None:
+            return
+        rows = len(self._grid)
+        cols = len(self._grid[0])
+        # Expand outward by Manhattan distance to find closest FLOOR.
+        for dist in range(1, max(rows, cols)):
+            for dr in range(-dist, dist + 1):
+                dc_abs = dist - abs(dr)
+                for dc in ([-dc_abs, dc_abs] if dc_abs else [0]):
+                    nr, nc = from_row + dr, from_col + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if self._grid[nr][nc] == CellType.FLOOR:
+                            planner = PathPlanner(self._grid)
+                            path = planner.find_path(
+                                (from_row, from_col), (nr, nc),
+                            )
+                            if path and len(path) > 1:
+                                await self._cache.set_path(robot.id, path[1:])
+                                return
 
     # ------------------------------------------------------------------
     # Helpers
