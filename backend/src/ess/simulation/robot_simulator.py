@@ -473,15 +473,11 @@ class RobotSimulator:
                         # A42TD arrived at deep rack — dispatch to rack-edge.
                         await self._dispatch_to_rack_edge(robot, target_row, target_col)
                 elif eq_task.type == EquipmentTaskType.RETURN:
-                    if is_edge:
-                        # K50H/A42TD arrived at rack-edge for return handoff.
-                        from src.ess.domain.events import ReturnAtCantilever
-                        await event_bus.publish(ReturnAtCantilever(
-                            pick_task_id=eq_task.pick_task_id,
-                            tote_id=tote_id,
-                        ))
-                    else:
-                        # A42TD returning tote to its deep rack location — fire completion.
+                    # Distinguish which robot arrived:
+                    # - A42TD arriving = delivering tote to rack → SourceBackInRack
+                    # - K50H arriving at rack-edge = handoff → ReturnAtCantilever
+                    if robot.id == eq_task.a42td_robot_id:
+                        # A42TD completing return delivery (even if on rack-edge row).
                         from src.ess.domain.events import SourceBackInRack
                         loc_id = eq_task.target_location_id or eq_task.source_location_id
                         if loc_id is not None:
@@ -490,6 +486,13 @@ class RobotSimulator:
                                 tote_id=tote_id,
                                 location_id=loc_id,
                             ))
+                    elif is_edge:
+                        # K50H arrived at rack-edge for return handoff.
+                        from src.ess.domain.events import ReturnAtCantilever
+                        await event_bus.publish(ReturnAtCantilever(
+                            pick_task_id=eq_task.pick_task_id,
+                            tote_id=tote_id,
+                        ))
 
     async def _dispatch_to_rack_edge(
         self, robot, from_row: int, from_col: int

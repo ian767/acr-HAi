@@ -203,12 +203,18 @@ class TaskExecutor:
 
         task.state = next_state
 
-        # Release robots when the task completes.
+        # Release robots when the task completes (task-safe: only releases
+        # robots still assigned to this specific task).
+        # For RETRIEVE tasks, do NOT release K50H here — it holds the tote
+        # at the station and will be released later by the return flow.
         if next_state == EquipmentTaskState.COMPLETED:
             if task.a42td_robot_id is not None:
-                await self._fleet.release_robot(task.a42td_robot_id)
-            if task.k50h_robot_id is not None:
-                await self._fleet.release_robot(task.k50h_robot_id)
+                await self._fleet.release_robot(task.a42td_robot_id, task.id)
+            if (
+                task.k50h_robot_id is not None
+                and task.type != EquipmentTaskType.RETRIEVE
+            ):
+                await self._fleet.release_robot(task.k50h_robot_id, task.id)
 
         await self._session.flush()
         return task
