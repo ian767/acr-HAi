@@ -24,8 +24,17 @@ async function request<T>(
   });
 
   if (!res.ok) {
-    const body = await res.text();
-    throw new APIError(res.status, body);
+    const text = await res.text();
+    let message: string;
+    try {
+      const body = JSON.parse(text);
+      const detail = body.detail ?? text;
+      // Ensure message is always a string (detail may be an object)
+      message = typeof detail === "string" ? detail : JSON.stringify(detail);
+    } catch {
+      message = text;
+    }
+    throw new APIError(res.status, message || `HTTP ${res.status}`);
   }
 
   if (res.status === 204) {

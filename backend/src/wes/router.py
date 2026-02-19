@@ -495,6 +495,26 @@ async def bind_target_tote(
             detail="Provide target_tote_id or target_tote_barcode",
         )
 
+    # Prevent binding the same tote to multiple active pick tasks.
+    from src.wes.domain.models import PickTask as PTModel
+    from src.wes.domain.enums import PickTaskState
+    from sqlalchemy import select
+
+    existing = await session.execute(
+        select(PTModel).where(
+            PTModel.target_tote_id == target_id,
+            PTModel.state.notin_([
+                PickTaskState.COMPLETED.value,
+            ]),
+            PTModel.id != body.pick_task_id,
+        ).limit(1)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="This tote is already bound to another active pick task",
+        )
+
     task.target_tote_id = target_id
     await session.commit()
     return task
