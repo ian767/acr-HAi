@@ -298,7 +298,9 @@ async def scan_item(
             # Method 1: Check station.current_robot_id
             if station.current_robot_id is not None:
                 robot = await session.get(Robot, station.current_robot_id)
-                if robot is not None and robot.hold_pick_task_id == body.pick_task_id:
+                if (robot is not None
+                        and robot.hold_pick_task_id == body.pick_task_id
+                        and robot.hold_at_station):
                     robot_present = True
 
             # Method 2: Search for any robot reserved at this station with hold_at_station

@@ -126,7 +126,9 @@ class StationOperator:
         station = await session.get(Station, station_id)
         if station is not None and station.current_robot_id is not None:
             robot = await session.get(Robot, station.current_robot_id)
-            if robot is not None and robot.hold_pick_task_id == pick_task_id:
+            if (robot is not None
+                    and robot.hold_pick_task_id == pick_task_id
+                    and robot.hold_at_station):
                 return True
 
         # Method 2: Search for any robot reserved for this station with hold_at_station

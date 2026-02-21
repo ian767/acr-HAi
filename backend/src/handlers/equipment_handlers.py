@@ -191,6 +191,19 @@ async def _handle_return_source_tote(event) -> None:
                 "Released K50H %s from WAITING_FOR_STATION for return flow",
                 k50h_at_station.id,
             )
+        else:
+            # K50H not found with hold_at_station=True (simulator may have
+            # cleared it already). Still clean up station.current_robot_id
+            # to prevent stale references allowing scans without a robot.
+            station = await session.get(Station, event.station_id)
+            if station is not None and station.current_robot_id is not None:
+                qsvc = StationQueueService(session)
+                await qsvc.release_station(event.station_id, station.current_robot_id)
+                await session.flush()
+                logger.info(
+                    "Cleaned up stale station.current_robot_id at station %s",
+                    event.station_id,
+                )
 
         # Guard: skip if a RETURN equipment task already exists for this pick task
         from src.ess.domain.models import EquipmentTask
