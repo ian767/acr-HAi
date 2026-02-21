@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useStations, useToggleStationOnline } from "../../api/hooks";
+import { StationOperatorView } from "../ess/components/StationOperatorView";
 
 const STATUS_COLORS: Record<string, string> = {
   IDLE: "#8b8fa3",
@@ -9,6 +11,18 @@ const STATUS_COLORS: Record<string, string> = {
 export default function StationManagementPage() {
   const { data: stations, isLoading } = useStations();
   const toggle = useToggleStationOnline();
+  const [operatorStation, setOperatorStation] = useState<{ id: string; name: string } | null>(null);
+
+  // Full-screen operator view
+  if (operatorStation) {
+    return (
+      <StationOperatorView
+        stationId={operatorStation.id}
+        stationName={operatorStation.name}
+        onClose={() => setOperatorStation(null)}
+      />
+    );
+  }
 
   return (
     <div style={{ padding: 24 }}>
@@ -65,6 +79,25 @@ export default function StationManagementPage() {
                 {station.is_online ? "ON" : "OFF"}
               </button>
             </div>
+
+            {/* Enter Station button */}
+            <button
+              onClick={() => setOperatorStation({ id: station.id, name: station.name })}
+              style={{
+                width: "100%",
+                marginTop: 12,
+                padding: "10px 0",
+                border: "2px solid var(--accent-blue)",
+                borderRadius: 8,
+                background: "rgba(59, 130, 246, 0.1)",
+                color: "var(--accent-blue)",
+                cursor: "pointer",
+                fontSize: 14,
+                fontWeight: 700,
+              }}
+            >
+              Enter Station
+            </button>
           </div>
         ))}
       </div>

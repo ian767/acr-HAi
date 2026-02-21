@@ -630,28 +630,32 @@ async def simulation_apply_preset(body: PresetRequest, session: SessionDep):
             station_records.append(station)
 
             # Create 6 put-wall slots per station.
-            for slot_num in range(1, 7):
+            pw_labels = ["A1", "A2", "A3", "B1", "B2", "B3"]
+            for pw_label in pw_labels:
                 slot = PutWallSlot(
                     station_id=station.id,
-                    slot_label=f"S{idx+1}-{slot_num:02d}",
+                    slot_label=pw_label,
                 )
                 session.add(slot)
 
         await session.flush()
         stations_created = len(station_records)
 
-        # Create Locations for rack cells.
+        # Create Locations for rack cells (multi-floor: 1=cantilever, 2-10=storage).
+        floors_per_rack = preset.get("floors_per_rack", 10)
         for i, (r, c) in enumerate(rack_positions):
-            loc = Location(
-                label=f"RACK-R{r:02d}C{c:02d}",
-                zone_id=zone.id,
-                rack_id=f"RACK-R{r:02d}C{c:02d}",
-                floor=1,
-                grid_row=r,
-                grid_col=c,
-            )
-            session.add(loc)
-            locations.append(loc)
+            rack_id = f"RACK-R{r:02d}C{c:02d}"
+            for floor in range(1, floors_per_rack + 1):
+                loc = Location(
+                    label=f"{rack_id}-F{floor:02d}",
+                    zone_id=zone.id,
+                    rack_id=rack_id,
+                    floor=floor,
+                    grid_row=r,
+                    grid_col=c,
+                )
+                session.add(loc)
+                locations.append(loc)
 
         # Create Locations for station cells.
         for station in station_records:
@@ -666,8 +670,8 @@ async def simulation_apply_preset(body: PresetRequest, session: SessionDep):
 
         await session.flush()
 
-        # Create Totes on rack locations.
-        rack_locations = [loc for loc in locations if loc.rack_id is not None]
+        # Create Totes on rack locations (floor > 1 only; floor 1 = cantilever).
+        rack_locations = [loc for loc in locations if loc.rack_id is not None and loc.floor > 1]
         sku_count = preset.get("sku_count", 10)
         totes_per_slot = preset.get("totes_per_rack_slot", 1)
         max_totes = preset.get("totes", len(rack_locations) * totes_per_slot)
@@ -776,6 +780,16 @@ async def simulation_apply_custom_preset(
             {"row": body.zone_rows - 2, "col": body.zone_cols * 2 // 3},
         ]
 
+    # Generate rack rows in groups of 2 with 1-row aisle between each group.
+    rack_rows: list[int] = []
+    current_row = body.rack_row_start
+    while current_row + 1 <= body.rack_row_end:
+        rack_rows.append(current_row)
+        rack_rows.append(current_row + 1)
+        current_row += 3  # 2 rack rows + 1 aisle row
+    # rack_edge_row = FLOOR aisle row after the last rack group (cantilever)
+    actual_edge_row = (rack_rows[-1] + 1) if rack_rows else body.rack_edge_row
+
     # Build a preset dict from the custom parameters.
     preset = {
         "description": "Custom preset",
@@ -786,10 +800,10 @@ async def simulation_apply_custom_preset(
         },
         "totes": body.totes,
         "racks": {
-            "rows": range(body.rack_row_start, body.rack_edge_row + 1),
+            "rows": rack_rows,
             "cols": range(body.rack_col_start, body.rack_col_end),
         },
-        "rack_edge_row": body.rack_edge_row,
+        "rack_edge_row": actual_edge_row,
         "stations": stations_list,
         "tick_interval_ms": 150,
         "speed": body.speed,
@@ -800,6 +814,7 @@ async def simulation_apply_custom_preset(
         "station_processing_ticks": body.station_processing_ticks,
         "sku_count": body.sku_count,
         "totes_per_rack_slot": 1,
+        "floors_per_rack": 10,
     }
 
     # Reuse the apply logic by calling simulation_apply_preset internally.

@@ -28,4 +28,23 @@ export const essApi = {
   simulationReset: () => api.post(`/ess/simulation/reset`),
   simulationConfig: () => api.get(`/ess/simulation/config`),
   simulationApplyPreset: (name: string) => api.post(`/ess/simulation/presets/apply`, { name }),
+
+  simulationApplyCustomPreset: (config: Record<string, unknown>) =>
+    api.post(`/ess/simulation/presets/custom`, config),
+
+  // Grid editor
+  gridSave: (data: { name: string; rows: number; cols: number; cells: Array<{ row: number; col: number; type: string }> }) =>
+    api.post(`/ess/grid/save`, data),
+
+  gridListLayouts: () => api.get(`/ess/grid/layouts`),
+
+  gridLoadLayout: (name: string) => api.get(`/ess/grid/layouts/${name}`),
+
+  gridUpdateCell: (row: number, col: number, cellType: string) =>
+    api.post(`/ess/grid/cell`, { row, col, cell_type: cellType }),
+
+  gridLoadInto: (name: string) => api.post(`/ess/grid/load/${name}`),
+
+  gridResize: (rows: number, cols: number) =>
+    api.post(`/ess/grid/resize?rows=${rows}&cols=${cols}`),
 };

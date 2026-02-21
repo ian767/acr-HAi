@@ -33,11 +33,16 @@ async def _handle_order_created(event) -> None:
         "sku": event.sku,
         "status": "NEW",
     })
+    await ws_broadcast("order.status_changed", {
+        "type": "order.status_changed",
+        "orderId": str(event.order_id),
+        "status": "NEW",
+    })
 
 
 @safe_handler
 async def _handle_order_allocated(event) -> None:
-    """OrderAllocated -> create PickTask + dispatch RetrieveSourceTote."""
+    """OrderAllocated -> create PickTask (CREATED) -> reserve K50H -> SOURCE_REQUESTED."""
     logger.info("OrderAllocated: order=%s station=%s", event.order_id, event.station_id)
 
     async with handler_session() as session:
@@ -54,6 +59,7 @@ async def _handle_order_allocated(event) -> None:
             return
 
         pts = PickTaskService(session)
+        # Creates PickTask in CREATED state
         pick_task = await pts.create_pick_task(
             order_id=order.id,
             station_id=event.station_id,
@@ -61,6 +67,7 @@ async def _handle_order_allocated(event) -> None:
             qty=order.quantity,
         )
 
+        # Find a tote for this SKU
         result = await session.execute(
             select(Tote).where(
                 Tote.sku == order.sku,
@@ -72,6 +79,17 @@ async def _handle_order_allocated(event) -> None:
 
         if tote is not None:
             pick_task.source_tote_id = tote.id
+            await session.flush()
+
+            # Transition CREATED -> RESERVED -> SOURCE_REQUESTED
+            # K50H reservation happens later when it picks up the tote
+            # at the cantilever (via _handle_source_at_cantilever).
+            await pts.transition_state(pick_task.id, "reserve")
+            await pts.transition_state(pick_task.id, "request_source")
+
+            for evt in pts.collect_events():
+                await event_bus.publish(evt)
+
             await session.commit()
 
             await event_bus.publish(RetrieveSourceTote(
@@ -89,6 +107,11 @@ async def _handle_order_allocated(event) -> None:
         "status": "ALLOCATED",
         "station_id": str(event.station_id),
     })
+    await ws_broadcast("order.status_changed", {
+        "type": "order.status_changed",
+        "orderId": str(event.order_id),
+        "status": "ALLOCATED",
+    })
 
 
 @safe_handler
@@ -98,6 +121,11 @@ async def _handle_order_completed(event) -> None:
         "order_id": str(event.order_id),
         "status": "COMPLETED",
     })
+    await ws_broadcast("order.status_changed", {
+        "type": "order.status_changed",
+        "orderId": str(event.order_id),
+        "status": "COMPLETED",
+    })
 
 
 @safe_handler
@@ -105,5 +133,10 @@ async def _handle_order_cancelled(event) -> None:
     logger.info("OrderCancelled: %s", event.order_id)
     await ws_broadcast("order.updated", {
         "order_id": str(event.order_id),
+        "status": "CANCELLED",
+    })
+    await ws_broadcast("order.status_changed", {
+        "type": "order.status_changed",
+        "orderId": str(event.order_id),
         "status": "CANCELLED",
     })

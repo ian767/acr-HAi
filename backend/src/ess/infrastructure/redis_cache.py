@@ -54,7 +54,7 @@ class RobotStateCache:
         raw = await self._redis.hgetall(key)
         if not raw:
             return {}
-        return {
+        state = {
             "robot_id": str(robot_id),
             "row": int(raw.get("row", 0)),
             "col": int(raw.get("col", 0)),
@@ -62,6 +62,14 @@ class RobotStateCache:
             "status": raw.get("status", ""),
             "zone_id": raw.get("zone_id", ""),
         }
+        # Include reservation/tote fields if present
+        if raw.get("reserved"):
+            state["reserved"] = raw.get("reserved") == "1"
+        if raw.get("hold_pick_task_id"):
+            state["hold_pick_task_id"] = raw.get("hold_pick_task_id")
+        if raw.get("hold_at_station"):
+            state["hold_at_station"] = raw.get("hold_at_station") == "1"
+        return state
 
     async def get_all_states(self, zone_id: uuid.UUID | None = None) -> list[dict]:
         """Return state dicts for all robots (optionally filtered by zone).
@@ -123,3 +131,78 @@ class RobotStateCache:
             return []
         data = json.loads(raw)
         return [(int(r), int(c)) for r, c in data]
+
+    # ------------------------------------------------------------------
+    # Reservation
+    # ------------------------------------------------------------------
+
+    async def update_reservation(
+        self,
+        robot_id: uuid.UUID,
+        reserved: bool = False,
+        order_id: uuid.UUID | None = None,
+        pick_task_id: uuid.UUID | None = None,
+        station_id: uuid.UUID | None = None,
+    ) -> None:
+        """Write reservation fields to the robot's Redis hash."""
+        key = f"robot:{robot_id}"
+        mapping = {
+            "reserved": "1" if reserved else "0",
+            "reservation_order_id": str(order_id) if order_id else "",
+            "reservation_pick_task_id": str(pick_task_id) if pick_task_id else "",
+            "reservation_station_id": str(station_id) if station_id else "",
+        }
+        await self._redis.hset(key, mapping=mapping)
+
+    async def clear_reservation(self, robot_id: uuid.UUID) -> None:
+        """Clear reservation fields from Redis."""
+        key = f"robot:{robot_id}"
+        mapping = {
+            "reserved": "0",
+            "reservation_order_id": "",
+            "reservation_pick_task_id": "",
+            "reservation_station_id": "",
+            "hold_pick_task_id": "",
+            "hold_at_station": "0",
+        }
+        await self._redis.hset(key, mapping=mapping)
+
+    # ------------------------------------------------------------------
+    # Tote Possession
+    # ------------------------------------------------------------------
+
+    async def update_tote_possession(
+        self,
+        robot_id: uuid.UUID,
+        hold_pick_task_id: uuid.UUID | None = None,
+        hold_at_station: bool = False,
+    ) -> None:
+        """Write tote possession fields to the robot's Redis hash."""
+        key = f"robot:{robot_id}"
+        mapping = {
+            "hold_pick_task_id": str(hold_pick_task_id) if hold_pick_task_id else "",
+            "hold_at_station": "1" if hold_at_station else "0",
+        }
+        await self._redis.hset(key, mapping=mapping)
+
+    async def clear_all(self) -> None:
+        """Delete all robot state and path keys from Redis."""
+        cursor: int | str = 0
+        while True:
+            cursor, keys = await self._redis.scan(
+                cursor=cursor, match="robot:*", count=100
+            )
+            if keys:
+                await self._redis.delete(*keys)
+            if cursor == 0:
+                break
+        # Also clear station queue keys
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(
+                cursor=cursor, match="station:*", count=100
+            )
+            if keys:
+                await self._redis.delete(*keys)
+            if cursor == 0:
+                break

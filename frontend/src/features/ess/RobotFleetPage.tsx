@@ -75,7 +75,8 @@ const STATUS_COLORS: Record<RobotStatus, string> = {
   ASSIGNED: "#3b82f6",
   MOVING: "#22c55e",
   WAITING: "#eab308",
-  DOCKING: "#a855f7",
+  WAITING_FOR_STATION: "#a855f7",
+  DWELLING: "#8b5cf6",
   BLOCKED: "#ef4444",
   CHARGING: "#14b8a6",
 };
@@ -85,7 +86,8 @@ const STATUS_BG: Record<RobotStatus, string> = {
   ASSIGNED: "rgba(59,130,246,0.15)",
   MOVING: "rgba(34,197,94,0.15)",
   WAITING: "rgba(234,179,8,0.15)",
-  DOCKING: "rgba(168,85,247,0.15)",
+  WAITING_FOR_STATION: "rgba(168,85,247,0.15)",
+  DWELLING: "rgba(139,92,246,0.15)",
   BLOCKED: "rgba(239,68,68,0.15)",
   CHARGING: "rgba(20,184,166,0.15)",
 };
@@ -95,7 +97,8 @@ const ALL_STATUSES: RobotStatus[] = [
   "ASSIGNED",
   "MOVING",
   "WAITING",
-  "DOCKING",
+  "WAITING_FOR_STATION",
+  "DWELLING",
   "BLOCKED",
   "CHARGING",
 ];

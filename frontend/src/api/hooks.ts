@@ -61,6 +61,27 @@ export function useScanItem() {
   });
 }
 
+export function useInventory() {
+  return useQuery({
+    queryKey: ["inventory"],
+    queryFn: () => wesApi.listInventory(),
+    refetchInterval: 5000,
+  });
+}
+
+export function useTotes(params?: {
+  sku?: string;
+  barcode?: string;
+  band?: string;
+  status?: string;
+}) {
+  return useQuery({
+    queryKey: ["totes", params],
+    queryFn: () => wesApi.listTotes(params),
+    refetchInterval: 10_000,
+  });
+}
+
 // === ESS Hooks ===
 
 export function useRobots(params?: { zone_id?: string; status?: string }) {
@@ -83,7 +104,7 @@ export function useGrid(zoneId: string) {
     queryKey: ["grid", zoneId],
     queryFn: () => essApi.getGrid(zoneId),
     enabled: !!zoneId,
-    staleTime: 60_000,
+    staleTime: 10_000,
   });
 }
 

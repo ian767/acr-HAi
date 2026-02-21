@@ -28,6 +28,12 @@ interface UiState {
   // Zone selection
   activeZoneId: string | null;
   setActiveZone: (id: string | null) => void;
+
+  // Map editor
+  editorMode: boolean;
+  editorTool: string;
+  setEditorMode: (on: boolean) => void;
+  setEditorTool: (tool: string) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -53,4 +59,9 @@ export const useUiStore = create<UiState>((set) => ({
 
   activeZoneId: null,
   setActiveZone: (id) => set({ activeZoneId: id }),
+
+  editorMode: false,
+  editorTool: "RACK",
+  setEditorMode: (on) => set({ editorMode: on }),
+  setEditorTool: (tool) => set({ editorTool: tool }),
 }));

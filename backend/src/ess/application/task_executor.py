@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from src.ess.application.fleet_manager import FleetManager
 from src.ess.application.path_planner import PathPlanner
@@ -87,6 +90,19 @@ class TaskExecutor:
         self._session.add(task)
         await self._session.flush()
 
+        # Check if the source tote is already being retrieved or returned
+        # by another equipment task.  Two pick tasks may share the same
+        # physical tote — only one should be dispatched at a time.
+        from src.handler_support import is_tote_in_use
+
+        if await is_tote_in_use(self._session, pick_task_id):
+            logger.info(
+                "Tote in use — eq_task %s stays PENDING (pick_task %s)",
+                task.id, pick_task_id,
+            )
+            await self._session.flush()
+            return task  # _retry_pending_tasks will dispatch when tote is free
+
         # Assign A42TD (rack -> cantilever).
         a42td = await self._fleet.find_nearest_idle(
             zone_id=source_loc.zone_id,
@@ -98,16 +114,9 @@ class TaskExecutor:
             await self._fleet.assign_robot(a42td.id, task.id)
             task.a42td_robot_id = a42td.id
 
-        # Assign K50H (cantilever -> station).
-        k50h = await self._fleet.find_nearest_idle(
-            zone_id=source_loc.zone_id,
-            robot_type=RobotType.K50H,
-            target_row=source_loc.grid_row,
-            target_col=source_loc.grid_col,
-        )
-        if k50h is not None:
-            await self._fleet.assign_robot(k50h.id, task.id)
-            task.k50h_robot_id = k50h.id
+        # K50H is NOT assigned here — it will be assigned later when
+        # the A42TD arrives at the cantilever (rack-edge handoff point).
+        # See arrival_handlers._handle_source_at_cantilever().
 
         await self._session.flush()
         return task
@@ -146,26 +155,26 @@ class TaskExecutor:
         await self._session.flush()
 
         # Assign K50H (station -> cantilever).
+        # Search near the STATION (where the K50H carrying the tote is),
+        # not near the deep rack target.
+        from src.wes.domain.models import Station
+        station = await self._session.get(Station, station_id)
+        search_row = station.grid_row if station else target_loc.grid_row
+        search_col = station.grid_col if station else target_loc.grid_col
         k50h = await self._fleet.find_nearest_idle(
             zone_id=target_loc.zone_id,
             robot_type=RobotType.K50H,
-            target_row=target_loc.grid_row,
-            target_col=target_loc.grid_col,
+            target_row=search_row,
+            target_col=search_col,
         )
         if k50h is not None:
             await self._fleet.assign_robot(k50h.id, task.id)
             task.k50h_robot_id = k50h.id
 
-        # Assign A42TD (cantilever -> rack).
-        a42td = await self._fleet.find_nearest_idle(
-            zone_id=target_loc.zone_id,
-            robot_type=RobotType.A42TD,
-            target_row=target_loc.grid_row,
-            target_col=target_loc.grid_col,
-        )
-        if a42td is not None:
-            await self._fleet.assign_robot(a42td.id, task.id)
-            task.a42td_robot_id = a42td.id
+        # A42TD is NOT assigned here — the RETURN A42TD leg completes
+        # instantly (no physical movement).  It will be assigned and
+        # immediately completed when K50H arrives at the cantilever.
+        # See arrival_handlers._handle_return_at_cantilever().
 
         await self._session.flush()
         return task

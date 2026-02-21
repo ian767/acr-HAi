@@ -50,15 +50,81 @@ async def _handle_retrieve_source_tote(event) -> None:
             pos = await get_robot_position(robot.id)
             start = pos or (robot.grid_row, robot.grid_col)
 
+            # Plan A42TD path directly to the rack-edge (cantilever handoff
+            # point) near the SOURCE column, not the robot's current
+            # position.  This distributes robots across different rack-edge
+            # cells and avoids congestion at a single target cell.
             source_loc = await session.get(Location, event.source_location_id)
-            if source_loc is not None:
-                await plan_and_store_path(
+            ref_row = source_loc.grid_row if source_loc else start[0]
+            ref_col = source_loc.grid_col if source_loc else start[1]
+
+            # Collect rack-edge cells already targeted by other active A42TDs.
+            from src.ess.infrastructure.redis_cache import RobotStateCache
+            from src.shared.redis import get_redis
+            from src.ess.domain.models import EquipmentTask as _ET
+            from src.ess.domain.enums import EquipmentTaskState as _ETS, EquipmentTaskType as _ETT
+            from sqlalchemy import select as _sel
+            _active = await session.execute(
+                _sel(_ET).where(
+                    _ET.type == _ETT.RETRIEVE,
+                    _ET.a42td_robot_id.isnot(None),
+                    _ET.state.in_([_ETS.PENDING, _ETS.A42TD_MOVING]),
+                    _ET.id != eq_task.id,
+                )
+            )
+            avoid: set[tuple[int, int]] = set()
+            for other in _active.scalars().all():
+                if other.source_location_id:
+                    other_loc = await session.get(Location, other.source_location_id)
+                    if other_loc:
+                        other_re = find_nearest_rack_edge(
+                            simulation_state.grid, other_loc.grid_row, other_loc.grid_col,
+                        )
+                        if other_re:
+                            avoid.add(other_re)
+
+            rack_edge = find_nearest_rack_edge(
+                simulation_state.grid, ref_row, ref_col, avoid_cells=avoid,
+            )
+            # If all nearby cells are taken, fall back to any rack-edge cell.
+            if rack_edge is None:
+                rack_edge = find_nearest_rack_edge(
+                    simulation_state.grid, ref_row, ref_col,
+                )
+            planned = None
+            if rack_edge is not None:
+                planned = await plan_and_store_path(
+                    svc, robot.id,
+                    start,
+                    rack_edge,
+                )
+            elif source_loc is not None:
+                # Fallback: use the source location directly (legacy path).
+                planned = await plan_and_store_path(
                     svc, robot.id,
                     start,
                     (source_loc.grid_row, source_loc.grid_col),
                 )
 
             await svc.executor.advance_task(eq_task.id, "a42td_dispatched")
+
+            # If A42TD is already at the target rack-edge, fire arrival
+            # immediately — the simulation tick won't detect it.
+            target = rack_edge or (source_loc.grid_row, source_loc.grid_col) if source_loc else None
+            if not planned and target and start == target:
+                from src.shared.event_bus import event_bus as _eb
+                from src.ess.domain.events import SourceAtCantilever
+                from src.wes.domain.models import PickTask as _PT
+                _pt = await session.get(_PT, event.pick_task_id)
+                if _pt and _pt.source_tote_id:
+                    await _eb.publish(SourceAtCantilever(
+                        pick_task_id=event.pick_task_id,
+                        tote_id=_pt.source_tote_id,
+                    ))
+                logger.info(
+                    "A42TD %s already at rack-edge %s — instant arrival",
+                    robot.id, target,
+                )
 
         await session.commit()
 
@@ -126,6 +192,23 @@ async def _handle_return_source_tote(event) -> None:
                 k50h_at_station.id,
             )
 
+        # Guard: skip if a RETURN equipment task already exists for this pick task
+        from src.ess.domain.models import EquipmentTask
+        from src.ess.domain.enums import EquipmentTaskType
+        existing = await session.execute(
+            select(EquipmentTask).where(
+                EquipmentTask.pick_task_id == event.pick_task_id,
+                EquipmentTask.type == EquipmentTaskType.RETURN,
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is not None:
+            logger.info(
+                "RETURN task already exists for pick_task %s — skipping",
+                event.pick_task_id,
+            )
+            await session.commit()
+            return
+
         svc = HandlerServices(session)
         eq_task = await svc.executor.execute_return(
             pick_task_id=event.pick_task_id,
@@ -142,13 +225,28 @@ async def _handle_return_source_tote(event) -> None:
 
             # K50H goes from station to rack-edge (handoff point, not deep rack).
             cant = find_nearest_rack_edge(simulation_state.grid, start[0], start[1])
+            planned = None
             if cant is not None:
-                await plan_and_store_path(
+                planned = await plan_and_store_path(
                     svc, robot.id,
                     start,
                     cant,
                 )
 
             await svc.executor.advance_task(eq_task.id, "a42td_dispatched")
+
+            # If K50H is already at rack-edge, fire ReturnAtCantilever
+            # immediately — the simulation tick won't detect it.
+            if not planned and cant and start == cant:
+                from src.shared.event_bus import event_bus as _eb
+                from src.ess.domain.events import ReturnAtCantilever
+                await _eb.publish(ReturnAtCantilever(
+                    pick_task_id=event.pick_task_id,
+                    tote_id=event.tote_id,
+                ))
+                logger.info(
+                    "K50H %s already at rack-edge %s — instant return arrival",
+                    robot.id, cant,
+                )
 
         await session.commit()

@@ -36,10 +36,11 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 10,
         "racks": {
-            "rows": range(2, 8),
+            # Groups of 2 with aisle rows between: [2,3] aisle@4 [5,6] edge@7
+            "rows": [2, 3, 5, 6],
             "cols": range(2, 8),
         },
-        "rack_edge_row": 7,
+        "rack_edge_row": 7,  # FLOOR aisle row = cantilever handoff
         "stations": [
             {"row": 13, "col": 5, **_build_queue_cells(13, 5, queue_size=2)},
         ],
@@ -51,6 +52,7 @@ _PRESETS: dict[str, dict] = {
         "station_processing_ticks": 0,
         "sku_count": 5,
         "totes_per_rack_slot": 1,
+        "floors_per_rack": 10,
         "interactive_mode": True,
     },
     "demo_small": {
@@ -62,10 +64,11 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 20,
         "racks": {
-            "rows": range(2, 10),
+            # Groups of 2 with aisles: [2,3] @4 [5,6] @7 [8,9] edge@10
+            "rows": [2, 3, 5, 6, 8, 9],
             "cols": range(2, 12),
         },
-        "rack_edge_row": 9,
+        "rack_edge_row": 10,  # FLOOR aisle row = cantilever handoff
         "stations": [
             {"row": 18, "col": 5, **_build_queue_cells(18, 5, queue_size=3)},
             {"row": 18, "col": 10, **_build_queue_cells(18, 10, queue_size=3)},
@@ -79,6 +82,7 @@ _PRESETS: dict[str, dict] = {
         "station_processing_ticks": 5,
         "sku_count": 10,
         "totes_per_rack_slot": 1,
+        "floors_per_rack": 10,
     },
     "demo_medium": {
         "description": "Medium WES demo with 20 robots and 100 totes",
@@ -89,10 +93,11 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 100,
         "racks": {
-            "rows": range(2, 18),
+            # Groups of 2 with aisles: [2,3]@4 [5,6]@7 [8,9]@10 [11,12]@13 [14,15]@16 [17,18] edge@19
+            "rows": [2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18],
             "cols": range(2, 28),
         },
-        "rack_edge_row": 17,
+        "rack_edge_row": 19,  # FLOOR aisle row = cantilever handoff
         "stations": [
             {"row": 35, "col": 10, **_build_queue_cells(35, 10, queue_size=3)},
             {"row": 35, "col": 20, **_build_queue_cells(35, 20, queue_size=3)},
@@ -108,6 +113,7 @@ _PRESETS: dict[str, dict] = {
         "station_processing_ticks": 5,
         "sku_count": 20,
         "totes_per_rack_slot": 1,
+        "floors_per_rack": 10,
     },
     "stress_test": {
         "description": "Stress test with 100 robots and 500 totes",
@@ -118,10 +124,11 @@ _PRESETS: dict[str, dict] = {
         },
         "totes": 500,
         "racks": {
-            "rows": range(2, 32),
+            # Groups of 2 with aisles: 10 groups from row 2
+            "rows": [r for g in range(10) for r in (2 + g * 3, 3 + g * 3)],
             "cols": range(2, 50),
         },
-        "rack_edge_row": 31,
+        "rack_edge_row": 32,  # FLOOR aisle row after last group [29,30]
         "stations": [
             {"row": 70, "col": c, **_build_queue_cells(70, c, queue_size=4)}
             for c in range(10, 110, 10)

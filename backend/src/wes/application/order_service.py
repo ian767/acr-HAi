@@ -92,17 +92,18 @@ class OrderService:
     async def allocate_order(self, order_id: uuid.UUID) -> Order:
         order = await self.get_order(order_id)
 
-        # Transition: NEW -> ALLOCATING
-        new_status, _ = order_sm.transition(order.status, "allocate")
-        order.status = new_status
-        await self._repo.update(order)
+        # Reserve inventory (allocated_qty += quantity)
+        if order.zone_id is not None:
+            await self._inventory.allocate_stock(
+                order.sku, order.zone_id, order.quantity
+            )
 
         # Run allocation engine
         station_id = await self._allocation.allocate(order)
         order.station_id = station_id
 
-        # Transition: ALLOCATING -> ALLOCATED
-        new_status, _ = order_sm.transition(order.status, "station_assigned")
+        # Transition: NEW -> ALLOCATED (single step)
+        new_status, _ = order_sm.transition(order.status, "allocate")
         order.status = new_status
         await self._repo.update(order)
         await self._session.commit()
@@ -135,9 +136,21 @@ class OrderService:
     async def complete_order(self, order_id: uuid.UUID) -> Order:
         order = await self.get_order(order_id)
 
+        # Auto-advance through intermediate states if needed.
+        if order.status == OrderStatus.ALLOCATED:
+            new_status, _ = order_sm.transition(order.status, "pick_started")
+            order.status = new_status
+
         new_status, _ = order_sm.transition(order.status, "all_picked")
         order.status = new_status
         await self._repo.update(order)
+
+        # Consume inventory: decrement total_qty and allocated_qty
+        if order.zone_id is not None:
+            await self._inventory.consume_stock(
+                order.sku, order.zone_id, order.quantity
+            )
+
         await self._session.commit()
 
         self._events.append(OrderCompleted(order_id=order.id))

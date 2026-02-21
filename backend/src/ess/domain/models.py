@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,24 @@ class Robot(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True), nullable=True
     )
     speed: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # Reservation fields
+    reserved: Mapped[bool] = mapped_column(Boolean, default=False)
+    reservation_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    reservation_pick_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    reservation_station_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+
+    # Tote Possession (K50H)
+    hold_pick_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    hold_at_station: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Zone(UUIDPrimaryKeyMixin, TimestampMixin, Base):

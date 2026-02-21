@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { wesApi } from "@/api/wes";
-import type { PickTask } from "@/types/pickTask";
+import type { PickTask, PutWallSlot } from "@/types/pickTask";
 import type { Order } from "@/types/order";
+import { Sound } from "@/utils/sounds";
 
 // ------------------------------------------------------------------ types
 
@@ -127,6 +128,7 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
 
   const [pickTasks, setPickTasks] = useState<PickTask[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [putwallSlots, setPutwallSlots] = useState<PutWallSlot[]>([]);
   const [barcode, setBarcode] = useState("");
   const [scanQty, setScanQty] = useState(1);
   const [scanning, setScanning] = useState(false);
@@ -134,15 +136,17 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
   const [scanMsg, setScanMsg] = useState("");
   const [toteBarcode, setToteBarcode] = useState("");
   const [bindingTote, setBindingTote] = useState(false);
+  const [pendingToteBarcode, setPendingToteBarcode] = useState<string | null>(null);
   const [exceptionMode, setExceptionMode] = useState(false);
   const [exceptionReason, setExceptionReason] = useState("");
   const flashTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  // Poll pick tasks + orders
+  // Poll pick tasks + orders + putwall
   useEffect(() => {
     const load = () => {
       wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
       wesApi.listOrders({ limit: 50 }).then(setOrders).catch(() => {});
+      wesApi.getPutwall(stationId).then(setPutwallSlots).catch(() => {});
     };
     load();
     const id = setInterval(load, 1500);
@@ -182,6 +186,12 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
   // Product info
   const product = activeTask ? getProductInfo(activeTask.sku) : null;
 
+  // Build put-wall slots (6 slots) from server putwall data (computed early for handlers)
+  const putWallSlots = buildPutWallSlots(pickTasks, putwallSlots);
+  const firstEmptySlotId = putWallSlots.find(
+    (s) => !s.toteBarcode && !s.bound && !s.ready && s.slotId,
+  )?.slotId ?? null;
+
   // Flash effect
   const triggerFlash = useCallback((type: "success" | "error", msg: string) => {
     setScanFlash(type);
@@ -211,11 +221,13 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
       }
       setBarcode("");
       setScanQty(1);
+      Sound.scanSuccess();
       triggerFlash("success", `Scanned ${scanQty}x ${activeTask.sku}`);
       queryClient.invalidateQueries({ queryKey: ["orders"] });
       // Immediately refresh tasks
       wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
     } catch (err: any) {
+      Sound.scanError();
       triggerFlash("error", err.message || "Scan failed");
     } finally {
       setScanning(false);
@@ -234,25 +246,56 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
     [handleScan],
   );
 
-  // Tote binding handler
-  const handleBindTote = useCallback(async () => {
-    if (!activeTask || bindingTote || !toteBarcode.trim()) return;
+  // Step 1: Scan target tote barcode → sets pendingToteBarcode (does NOT auto-bind).
+  const handleScanTote = useCallback(() => {
+    if (!toteBarcode.trim()) return;
+    setPendingToteBarcode(toteBarcode.trim());
+    setToteBarcode("");
+    Sound.toteBound();
+    triggerFlash("success", "Tote scanned — select a put-wall cell");
+  }, [toteBarcode, triggerFlash]);
+
+  // Step 2: Operator clicks a putwall cell → binds pendingToteBarcode to that slot.
+  const handleCellBind = useCallback(async (slotId: string) => {
+    if (!pendingToteBarcode || bindingTote) return;
     setBindingTote(true);
     try {
-      await wesApi.bindTote(stationId, activeTask.id, toteBarcode.trim());
-      setToteBarcode("");
-      triggerFlash("success", "Target tote bound");
+      await wesApi.bindPutwallSlot(stationId, slotId, pendingToteBarcode);
+      // If active task needs a target tote, also bind to the task
+      if (activeTask && !activeTask.target_tote_id) {
+        await wesApi.bindTote(stationId, activeTask.id, pendingToteBarcode);
+      }
+      setPendingToteBarcode(null);
+      Sound.toteBound();
+      triggerFlash("success", "Tote bound to cell");
+      wesApi.getPutwall(stationId).then(setPutwallSlots).catch(() => {});
       wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
     } catch (err: any) {
       triggerFlash("error", err.message || "Bind failed");
     } finally {
       setBindingTote(false);
     }
-  }, [activeTask, stationId, toteBarcode, bindingTote, triggerFlash]);
+  }, [stationId, pendingToteBarcode, bindingTote, triggerFlash, activeTask]);
 
-  // Whether active task needs tote binding
-  const needsToteBinding = activeTask && !activeTask.target_tote_id &&
-    (activeTask.state === "SOURCE_AT_STATION" || activeTask.state === "PICKING");
+  // Tote-full handler: operator clicks a bound putwall cell to mark it full.
+  const TOTE_CAPACITY = 20;
+  const handleToteFull = useCallback(async (taskId: string) => {
+    try {
+      await wesApi.toteFull(stationId, taskId);
+      Sound.scanSuccess();
+      triggerFlash("success", "Tote marked full — returning");
+      wesApi.getPutwall(stationId).then(setPutwallSlots).catch(() => {});
+      wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
+      queryClient.invalidateQueries({ queryKey: ["orders"] });
+    } catch (err: any) {
+      triggerFlash("error", err.message || "Tote-full failed");
+    }
+  }, [stationId, triggerFlash, queryClient]);
+
+  // Show tote binding when: empty putwall slots exist OR active task needs target tote
+  const needsToteBinding = !!(firstEmptySlotId) ||
+    !!(activeTask && !activeTask.target_tote_id &&
+      (activeTask.state === "SOURCE_AT_STATION" || activeTask.state === "PICKING"));
 
   // Exception handler
   const handleException = useCallback(async () => {
@@ -270,9 +313,6 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
       triggerFlash("error", err.message || "Exception failed");
     }
   }, [activeTask, stationId, triggerFlash, queryClient]);
-
-  // Build put-wall slots (6 slots)
-  const putWallSlots = buildPutWallSlots(pickTasks);
 
   // -------------------------------------------------------------- render
 
@@ -321,7 +361,14 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
 
         {/* ---- Bottom Left: Put-Wall ---- */}
         <div style={QUADRANT}>
-          <BottomLeftPutWall slots={putWallSlots} activeTaskId={activeTask?.id ?? null} />
+          <BottomLeftPutWall
+            slots={putWallSlots}
+            activeTaskId={activeTask?.id ?? null}
+            pendingToteBarcode={pendingToteBarcode}
+            onCellBind={handleCellBind}
+            onToteFull={handleToteFull}
+            toteCapacity={TOTE_CAPACITY}
+          />
         </div>
 
         {/* ---- Bottom Right: Scan Interface ---- */}
@@ -343,11 +390,12 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
             exceptionReason={exceptionReason}
             setExceptionReason={setExceptionReason}
             onException={handleException}
-            needsToteBinding={!!needsToteBinding}
+            needsToteBinding={needsToteBinding}
             toteBarcode={toteBarcode}
             setToteBarcode={setToteBarcode}
             bindingTote={bindingTote}
-            onBindTote={handleBindTote}
+            onScanTote={handleScanTote}
+            pendingToteBarcode={pendingToteBarcode}
           />
         </div>
       </div>
@@ -612,47 +660,63 @@ interface PutWallSlotData {
   bound: boolean;
   assigned: boolean;
   toteId: string | null;
+  toteBarcode: string | null;
   taskId: string | null;
   sku: string | null;
   qtyTotal: number;
   qtyPicked: number;
   state: string | null;
+  slotId: string | null;
+  ready: boolean; // pre-bound tote, no task assigned yet
 }
 
-function buildPutWallSlots(tasks: PickTask[]): PutWallSlotData[] {
+function buildPutWallSlots(
+  tasks: PickTask[],
+  serverSlots: PutWallSlot[],
+): PutWallSlotData[] {
   const labels = ["A1", "A2", "A3", "B1", "B2", "B3"];
-  const slots: PutWallSlotData[] = labels.map((label, i) => ({
-    index: i,
-    label,
-    bound: false,
-    assigned: false,
-    toteId: null,
-    taskId: null,
-    sku: null,
-    qtyTotal: 0,
-    qtyPicked: 0,
-    state: null,
-  }));
 
-  // Map active/scanning tasks to slots — only show as "bound" when a target tote
-  // has actually been assigned by the operator.
+  // Build map of server slots by label
+  const serverMap = new Map<string, PutWallSlot>();
+  serverSlots.forEach((s) => serverMap.set(s.slot_label, s));
+
+  // Build map of tasks by put_wall_slot_id
+  const taskBySlot = new Map<string, PickTask>();
   const activeTasks = tasks.filter(
     (t) =>
       t.state !== "COMPLETED" &&
       t.state !== "RETURN_AT_CANTILEVER",
   );
-
-  activeTasks.forEach((task, i) => {
-    if (i < slots.length) {
-      slots[i]!.assigned = true;
-      slots[i]!.bound = !!task.target_tote_id;
-      slots[i]!.toteId = task.target_tote_id;
-      slots[i]!.taskId = task.id;
-      slots[i]!.sku = task.sku;
-      slots[i]!.qtyTotal = task.qty_to_pick;
-      slots[i]!.qtyPicked = task.qty_picked;
-      slots[i]!.state = task.state;
+  activeTasks.forEach((t) => {
+    if (t.put_wall_slot_id) {
+      taskBySlot.set(t.put_wall_slot_id, t);
     }
+  });
+
+  const slots: PutWallSlotData[] = labels.map((label, i) => {
+    const sv = serverMap.get(label);
+    // Only show tasks that the backend has explicitly linked to this slot.
+    // No client-side fallback — slot state is determined by server data only.
+    const task: PickTask | undefined = sv ? taskBySlot.get(sv.id) : undefined;
+
+    const hasTote = !!(sv?.target_tote_id);
+    const hasTask = !!task;
+
+    return {
+      index: i,
+      label,
+      bound: hasTask ? !!task.target_tote_id : hasTote,
+      assigned: hasTask,
+      toteId: task?.target_tote_id ?? sv?.target_tote_id ?? null,
+      toteBarcode: task?.target_tote_barcode ?? sv?.target_tote_barcode ?? null,
+      taskId: task?.id ?? null,
+      sku: task?.sku ?? null,
+      qtyTotal: task?.qty_to_pick ?? 0,
+      qtyPicked: task?.qty_picked ?? 0,
+      state: task?.state ?? null,
+      slotId: sv?.id ?? null,
+      ready: hasTote && !hasTask && !sv?.is_locked, // pre-bound, no task yet
+    } as PutWallSlotData;
   });
 
   return slots;
@@ -661,9 +725,17 @@ function buildPutWallSlots(tasks: PickTask[]): PutWallSlotData[] {
 function BottomLeftPutWall({
   slots,
   activeTaskId,
+  pendingToteBarcode,
+  onCellBind,
+  onToteFull,
+  toteCapacity,
 }: {
   slots: PutWallSlotData[];
   activeTaskId: string | null;
+  pendingToteBarcode: string | null;
+  onCellBind: (slotId: string) => void;
+  onToteFull: (taskId: string) => void;
+  toteCapacity: number;
 }) {
   return (
     <div>
@@ -685,24 +757,47 @@ function BottomLeftPutWall({
             ? Math.round((slot.qtyPicked / slot.qtyTotal) * 100)
             : 0;
           const isDone = slot.bound && slot.qtyPicked >= slot.qtyTotal && slot.qtyTotal > 0;
+          const isFull = slot.assigned && slot.qtyPicked >= toteCapacity;
+
+          // Cell is clickable for binding when pendingToteBarcode is set and cell is empty
+          const canBind = !!pendingToteBarcode && !slot.toteBarcode && !slot.bound && !slot.ready && !!slot.slotId;
+          // Cell is clickable for tote-full when it has a task and is bound (including DONE cells)
+          const canMarkFull = slot.assigned && slot.bound && !!slot.taskId;
+
+          const isClickable = canBind || canMarkFull;
 
           return (
             <div
               key={slot.label}
+              onClick={() => {
+                if (canBind && slot.slotId) {
+                  onCellBind(slot.slotId);
+                } else if (canMarkFull && slot.taskId) {
+                  onToteFull(slot.taskId);
+                }
+              }}
               style={{
-                background: isActive
-                  ? "#22c55e12"
-                  : slot.bound
-                    ? "#1a1d27"
-                    : "#12141c",
+                background: canBind
+                  ? "#eab30815"
+                  : isActive
+                    ? "#22c55e12"
+                    : slot.bound || slot.ready
+                      ? "#1a1d27"
+                      : "#12141c",
                 border: `2px solid ${
-                  isActive
-                    ? "#22c55e"
-                    : isDone
-                      ? "#22c55e66"
-                      : slot.bound
-                        ? "#3b82f644"
-                        : "#2d3148"
+                  canBind
+                    ? "#eab308"
+                    : isFull
+                      ? "#ef4444"
+                      : isActive
+                        ? "#22c55e"
+                        : isDone
+                          ? "#22c55e66"
+                          : slot.ready
+                            ? "#22c55e44"
+                            : slot.bound
+                              ? "#3b82f644"
+                              : "#2d3148"
                 }`,
                 borderRadius: 10,
                 padding: 12,
@@ -711,39 +806,44 @@ function BottomLeftPutWall({
                 flexDirection: "column",
                 justifyContent: "space-between",
                 transition: "border-color 0.3s, background 0.3s",
+                cursor: isClickable ? "pointer" : "default",
+                opacity: pendingToteBarcode && !canBind && !slot.bound && !slot.ready ? 0.4 : 1,
               }}
             >
               {/* Slot header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: slot.assigned ? "#e2e8f0" : "#4a5568" }}>
+                <span style={{ fontSize: 16, fontWeight: 700, color: (slot.assigned || slot.ready || canBind) ? "#e2e8f0" : "#4a5568" }}>
                   {slot.label}
                 </span>
-                {slot.bound ? (
-                  <span
-                    style={{
-                      ...BADGE,
-                      background: isDone ? "#22c55e" : isActive ? "#3b82f6" : "#4a5568",
-                    }}
-                  >
-                    {isDone ? "DONE" : "BOUND"}
-                  </span>
+                {isFull ? (
+                  <span style={{ ...BADGE, background: "#ef4444" }}>FULL ({slot.qtyPicked}/{toteCapacity})</span>
+                ) : isDone ? (
+                  <span style={{ ...BADGE, background: "#22c55e" }}>DONE</span>
+                ) : slot.bound && slot.assigned ? (
+                  <span style={{ ...BADGE, background: isActive ? "#3b82f6" : "#4a5568" }}>BOUND</span>
                 ) : slot.assigned ? (
                   <span style={{ ...BADGE, background: "#eab308" }}>AWAITING</span>
+                ) : slot.ready ? (
+                  <span style={{ ...BADGE, background: "#22c55e" }}>READY</span>
+                ) : canBind ? (
+                  <span style={{ ...BADGE, background: "#eab308" }}>SELECT</span>
                 ) : (
                   <span style={{ fontSize: 10, color: "#4a5568" }}>EMPTY</span>
                 )}
               </div>
 
+              {/* Tote barcode (shown when pre-bound or task-bound) */}
+              {slot.toteBarcode && (
+                <div style={{ fontSize: 10, color: "#60a5fa", fontFamily: "monospace", marginTop: 4 }}>
+                  {slot.toteBarcode}
+                </div>
+              )}
+
               {slot.assigned ? (
                 <>
                   {/* SKU */}
-                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
+                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>
                     {slot.sku}
-                    {!slot.bound && (
-                      <span style={{ fontSize: 10, color: "#eab308", marginLeft: 6 }}>
-                        (bind tote)
-                      </span>
-                    )}
                   </div>
 
                   {/* Qty progress */}
@@ -759,17 +859,41 @@ function BottomLeftPutWall({
                         style={{
                           height: "100%",
                           width: `${pct}%`,
-                          background: isDone ? "#22c55e" : "#3b82f6",
+                          background: isFull ? "#ef4444" : isDone ? "#22c55e" : "#3b82f6",
                           borderRadius: 2,
                           transition: "width 0.3s",
                         }}
                       />
                     </div>
+                    {canMarkFull && (
+                      <div style={{ fontSize: 10, color: "#ef4444", marginTop: 4, textAlign: "center" }}>
+                        Click to mark tote full
+                      </div>
+                    )}
                   </div>
                 </>
-              ) : (
+              ) : slot.ready ? (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <span style={{ fontSize: 24, opacity: 0.15 }}>&#9634;</span>
+                  <span style={{ fontSize: 11, color: "#22c55e", opacity: 0.7 }}>Tote ready</span>
+                </div>
+              ) : canBind ? (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 12, color: "#eab308", fontWeight: 600 }}>
+                    Click to bind tote here
+                  </span>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <span style={{ fontSize: 11, opacity: 0.3, color: "#4a5568" }}>
+                    Scan tote in scan area
+                  </span>
                 </div>
               )}
             </div>
@@ -809,7 +933,8 @@ function BottomRightScan({
   toteBarcode,
   setToteBarcode,
   bindingTote,
-  onBindTote,
+  onScanTote,
+  pendingToteBarcode,
 }: {
   activeTask: PickTask | null;
   barcode: string;
@@ -831,31 +956,65 @@ function BottomRightScan({
   toteBarcode: string;
   setToteBarcode: (v: string) => void;
   bindingTote: boolean;
-  onBindTote: () => void;
+  onScanTote: () => void;
+  pendingToteBarcode: string | null;
 }) {
   const remaining = activeTask
     ? activeTask.qty_to_pick - activeTask.qty_picked
     : 0;
   const maxQty = Math.max(1, remaining);
 
-  if (!activeTask) {
+  // Phase 1: Scan tote barcode
+  // Phase 2: Pending tote → "select a cell" message
+  // Phase 3: SKU scan
+
+  // Phase 2: Tote scanned, waiting for cell selection
+  if (pendingToteBarcode) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#64748b" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 48, marginBottom: 12, opacity: 0.3 }}>&#128269;</div>
-          <div style={{ fontSize: 14 }}>No active task</div>
-          <div style={{ fontSize: 12, marginTop: 4 }}>Waiting for source tote to arrive at station</div>
+      <div>
+        <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
+          Step 2 &mdash; Select Put-Wall Cell
         </div>
+
+        <div
+          style={{
+            background: "#eab30815",
+            border: "2px solid #eab30844",
+            borderRadius: 8,
+            padding: 20,
+            marginBottom: 16,
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#eab308", marginBottom: 8 }}>
+            Tote scanned: <span style={{ fontFamily: "monospace" }}>{pendingToteBarcode}</span>
+          </div>
+          <div style={{ fontSize: 13, color: "#94a3b8" }}>
+            Click an empty put-wall cell to bind this tote.
+          </div>
+        </div>
+
+        {bindingTote && (
+          <div style={{ fontSize: 12, color: "#eab308", textAlign: "center" }}>
+            Binding...
+          </div>
+        )}
+
+        {scanMsg && (
+          <div style={{ fontSize: 12, color: scanFlash === "error" ? "#ef4444" : "#22c55e", textAlign: "center" }}>
+            {scanMsg}
+          </div>
+        )}
       </div>
     );
   }
 
-  // Tote binding step: before scanning, operator must bind a target tote
-  if (needsToteBinding) {
+  // Phase 1: Tote binding step (scan tote barcode)
+  if (needsToteBinding && !(activeTask && activeTask.target_tote_id)) {
     return (
       <div>
         <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
-          Bind Target Tote
+          Step 1 &mdash; Scan Target Tote
         </div>
 
         <div
@@ -869,10 +1028,10 @@ function BottomRightScan({
           }}
         >
           <div style={{ fontSize: 14, fontWeight: 600, color: "#eab308", marginBottom: 6 }}>
-            Target tote required
+            Scan target tote barcode
           </div>
           <div style={{ fontSize: 12, color: "#94a3b8" }}>
-            Scan or enter the target tote barcode where picked items will be placed.
+            Then select a put-wall cell to bind it.
           </div>
         </div>
 
@@ -884,7 +1043,7 @@ function BottomRightScan({
             type="text"
             value={toteBarcode}
             onChange={(e) => setToteBarcode(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onBindTote(); } }}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onScanTote(); } }}
             placeholder="Scan target tote barcode..."
             autoFocus
             style={{
@@ -895,22 +1054,22 @@ function BottomRightScan({
         </div>
 
         <button
-          onClick={onBindTote}
-          disabled={bindingTote || !toteBarcode.trim()}
+          onClick={onScanTote}
+          disabled={!toteBarcode.trim()}
           style={{
             width: "100%",
             padding: "14px 0",
             border: "none",
             borderRadius: 8,
-            background: bindingTote ? "#4a5568" : "#eab308",
+            background: !toteBarcode.trim() ? "#4a5568" : "#eab308",
             color: "#000",
-            cursor: bindingTote ? "not-allowed" : "pointer",
+            cursor: !toteBarcode.trim() ? "not-allowed" : "pointer",
             fontSize: 16,
             fontWeight: 700,
             marginBottom: 8,
           }}
         >
-          {bindingTote ? "Binding..." : "Bind Target Tote"}
+          Scan Tote
         </button>
 
         {scanMsg && (
@@ -922,10 +1081,23 @@ function BottomRightScan({
     );
   }
 
+  // No active task with target tote → waiting for source tote
+  if (!activeTask || !activeTask.target_tote_id) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#64748b" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 12, opacity: 0.3 }}>&#128269;</div>
+          <div style={{ fontSize: 14 }}>Waiting for source tote</div>
+          <div style={{ fontSize: 12, marginTop: 4 }}>A robot is fetching the source tote to the station</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
-        Scan Interface
+        Step 3 &mdash; Scan SKU
       </div>
 
       {/* Expected SKU indicator */}

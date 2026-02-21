@@ -315,6 +315,23 @@ export function WarehouseMap() {
       ctx.font = "8px monospace";
       ctx.textAlign = "center";
       ctx.fillText(robot.name ?? id.slice(0, 6), x, y + 14);
+
+      // Task-type mission label (e.g. →R, ←S)
+      if (robot.task_type && robot.status !== "IDLE" && robot.status !== "WAITING_FOR_STATION") {
+        const rType = inferType(robot);
+        let label = "";
+        if (rType === "A42TD") {
+          label = robot.task_type === "RETRIEVE" ? "\u2192R" : "\u2190R";
+        } else {
+          label = robot.task_type === "RETRIEVE" ? "\u2192S" : "\u2190S";
+        }
+        if (label) {
+          ctx.font = "bold 7px monospace";
+          ctx.fillStyle = rType === "A42TD" ? "#93c5fd" : "#86efac";
+          ctx.textAlign = "left";
+          ctx.fillText(label, x + 9, y - 5);
+        }
+      }
     }
 
     ctx.restore();

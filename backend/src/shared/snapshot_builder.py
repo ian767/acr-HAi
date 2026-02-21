@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import select
@@ -32,7 +33,7 @@ async def build_snapshot() -> dict[str, Any]:
         robots: dict[str, Any] = {}
         for r in robots_raw:
             path = await cache.get_path(r.id)
-            robots[str(r.id)] = {
+            robot_data: dict[str, Any] = {
                 "id": str(r.id),
                 "name": r.name,
                 "type": r.type.value,
@@ -42,12 +43,26 @@ async def build_snapshot() -> dict[str, Any]:
                 "status": r.status.value,
                 "path": [[row, col] for row, col in path] if path else [],
             }
+            # Include reservation/tote fields
+            if r.reserved:
+                robot_data["reserved"] = True
+                robot_data["reservation"] = {
+                    "order_id": str(r.reservation_order_id) if r.reservation_order_id else None,
+                    "pick_task_id": str(r.reservation_pick_task_id) if r.reservation_pick_task_id else None,
+                    "station_id": str(r.reservation_station_id) if r.reservation_station_id else None,
+                }
+            if r.hold_pick_task_id:
+                robot_data["hold_pick_task_id"] = str(r.hold_pick_task_id)
+                robot_data["hold_at_station"] = r.hold_at_station
+
+            robots[str(r.id)] = robot_data
 
         # Stations
         result = await session.execute(select(Station))
         stations_raw = result.scalars().all()
-        stations = [
-            {
+        stations = []
+        for s in stations_raw:
+            station_data: dict[str, Any] = {
                 "id": str(s.id),
                 "name": s.name,
                 "zone_id": str(s.zone_id),
@@ -55,9 +70,21 @@ async def build_snapshot() -> dict[str, Any]:
                 "grid_col": s.grid_col,
                 "is_online": s.is_online,
                 "status": s.status.value,
+                "current_robot_id": str(s.current_robot_id) if s.current_robot_id else None,
             }
-            for s in stations_raw
-        ]
+            # Include queue cell positions
+            if s.approach_cell_row is not None:
+                station_data["approach_cell_row"] = s.approach_cell_row
+                station_data["approach_cell_col"] = s.approach_cell_col
+            if s.holding_cell_row is not None:
+                station_data["holding_cell_row"] = s.holding_cell_row
+                station_data["holding_cell_col"] = s.holding_cell_col
+            if s.queue_cells_json:
+                try:
+                    station_data["queue_cells"] = json.loads(s.queue_cells_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            stations.append(station_data)
 
         # Pick Tasks
         result = await session.execute(select(PickTask))

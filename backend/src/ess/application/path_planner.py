@@ -11,6 +11,8 @@ from typing import Sequence
 from src.ess.domain.enums import CellType
 
 # Cells that robots cannot traverse.
+# A42TD navigates via aisle (FLOOR) rows between rack groups; it cannot drive
+# through RACK cells themselves.
 _IMPASSABLE: frozenset[CellType] = frozenset({CellType.WALL, CellType.RACK})
 
 # Four-directional movement deltas: (d_row, d_col).
@@ -54,8 +56,14 @@ class PathPlanner:
         """
         if not self._in_bounds(start) or not self._in_bounds(goal):
             return []
-        if self._is_blocked(start) or self._is_blocked(goal):
+        if self._is_blocked(start):
             return []
+        # Auto-resolve blocked goal (e.g. RACK cell) to nearest walkable cell.
+        if self._is_blocked(goal):
+            resolved = self._nearest_walkable(goal)
+            if resolved is None:
+                return []
+            goal = resolved
         if start == goal:
             return [start]
 
@@ -99,6 +107,18 @@ class PathPlanner:
     def _heuristic(a: tuple[int, int], b: tuple[int, int]) -> float:
         """Manhattan distance heuristic."""
         return float(abs(a[0] - b[0]) + abs(a[1] - b[1]))
+
+    def _nearest_walkable(self, pos: tuple[int, int]) -> tuple[int, int] | None:
+        """Find the nearest walkable cell to a blocked position (e.g. RACK)."""
+        for dist in range(1, max(self._rows, self._cols)):
+            for dr in range(-dist, dist + 1):
+                dc_abs = dist - abs(dr)
+                for dc in ([dc_abs, -dc_abs] if dc_abs else [0]):
+                    nr, nc = pos[0] + dr, pos[1] + dc
+                    candidate = (nr, nc)
+                    if self._in_bounds(candidate) and not self._is_blocked(candidate):
+                        return candidate
+        return None
 
     def _in_bounds(self, pos: tuple[int, int]) -> bool:
         r, c = pos

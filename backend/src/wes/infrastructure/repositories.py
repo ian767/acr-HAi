@@ -170,6 +170,12 @@ class InventoryRepository:
         result = await self._session.execute(stmt)
         return result.scalars().first()
 
+    async def get_by_sku(self, sku: str) -> Inventory | None:
+        """Look up inventory by SKU only (ignoring zone)."""
+        stmt = select(Inventory).where(Inventory.sku == sku).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def list(
         self,
         *,

@@ -41,6 +41,8 @@ class AllocationEngine:
 
         Raises ``RuntimeError`` when no eligible stations exist.
         """
+        if order.zone_id is None:
+            raise RuntimeError("Cannot allocate: no zone. Apply a preset first.")
         stations = await self._online_stations(order.zone_id)
         if not stations:
             raise RuntimeError("No online stations available for allocation")

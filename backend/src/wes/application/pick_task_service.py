@@ -60,7 +60,7 @@ class PickTaskService:
             qty_to_pick=qty,
             qty_picked=0,
             source_tote_id=source_tote_id,
-            state=PickTaskState.SOURCE_REQUESTED,
+            state=PickTaskState.CREATED,
         )
         task = await self._repo.add(task)
         await self._session.commit()
@@ -76,6 +76,13 @@ class PickTaskService:
         )
         logger.info("PickTask created: %s for order %s", task.id, order_id)
         return task
+
+    async def complete_at_station(self, pick_task_id: uuid.UUID) -> PickTask:
+        """Complete a pick task directly at the station (CV-1 route).
+
+        Transitions: SOURCE_AT_STATION -> COMPLETED.
+        """
+        return await self.transition_state(pick_task_id, "complete")
 
     async def transition_state(
         self, pick_task_id: uuid.UUID, event: str

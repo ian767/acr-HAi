@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -5,6 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import settings
 from src.shared.redis import close_redis, get_redis
+
+# Configure logging so handler messages are visible in dev
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -18,6 +28,41 @@ async def lifespan(app: FastAPI):
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Lightweight schema migration for SQLite dev databases:
+        # add columns that were introduced after initial table creation.
+        if "sqlite" in settings.database_url:
+            import sqlalchemy as sa
+
+            _MIGRATIONS = [
+                ("inventory", "sku_name", "VARCHAR(200)"),
+                ("inventory", "band", "VARCHAR(1) DEFAULT 'C'"),
+                # Robot reservation fields
+                ("robots", "reserved", "BOOLEAN DEFAULT 0"),
+                ("robots", "reservation_order_id", "VARCHAR(36)"),
+                ("robots", "reservation_pick_task_id", "VARCHAR(36)"),
+                ("robots", "reservation_station_id", "VARCHAR(36)"),
+                # Robot tote possession fields
+                ("robots", "hold_pick_task_id", "VARCHAR(36)"),
+                ("robots", "hold_at_station", "BOOLEAN DEFAULT 0"),
+                # Station queue fields
+                ("stations", "approach_cell_row", "INTEGER"),
+                ("stations", "approach_cell_col", "INTEGER"),
+                ("stations", "holding_cell_row", "INTEGER"),
+                ("stations", "holding_cell_col", "INTEGER"),
+                ("stations", "queue_cells_json", "TEXT"),
+                ("stations", "current_robot_id", "VARCHAR(36)"),
+                # Tote barcode denormalization
+                ("pick_tasks", "target_tote_barcode", "VARCHAR(100)"),
+                ("put_wall_slots", "target_tote_barcode", "VARCHAR(100)"),
+            ]
+            for table, col, col_type in _MIGRATIONS:
+                try:
+                    await conn.execute(
+                        sa.text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                    )
+                except Exception:
+                    pass  # Column already exists
 
     # Seed database
     if settings.seed_on_startup:

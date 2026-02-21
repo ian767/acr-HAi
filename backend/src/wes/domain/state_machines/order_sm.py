@@ -7,10 +7,6 @@ _TRANSITIONS: dict[
     tuple[OrderStatus, str], tuple[OrderStatus, list[str]]
 ] = {
     (OrderStatus.NEW, "allocate"): (
-        OrderStatus.ALLOCATING,
-        ["run_allocation_engine"],
-    ),
-    (OrderStatus.ALLOCATING, "station_assigned"): (
         OrderStatus.ALLOCATED,
         ["create_pick_tasks", "emit_order_allocated"],
     ),
@@ -22,13 +18,16 @@ _TRANSITIONS: dict[
         OrderStatus.COMPLETED,
         ["emit_order_completed"],
     ),
+    (OrderStatus.IN_PROGRESS, "fail"): (
+        OrderStatus.FAILED,
+        ["emit_order_failed"],
+    ),
 }
 
 # States from which cancellation is allowed (all non-terminal states).
 _CANCELLABLE: frozenset[OrderStatus] = frozenset(
     {
         OrderStatus.NEW,
-        OrderStatus.ALLOCATING,
         OrderStatus.ALLOCATED,
         OrderStatus.IN_PROGRESS,
     }

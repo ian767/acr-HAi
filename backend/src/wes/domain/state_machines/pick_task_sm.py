@@ -6,14 +6,27 @@ from src.wes.domain.enums import PickTaskState
 _TRANSITIONS: dict[
     tuple[PickTaskState, str], tuple[PickTaskState, list[str]]
 ] = {
+    (PickTaskState.CREATED, "reserve"): (
+        PickTaskState.RESERVED,
+        ["create_reservation"],
+    ),
+    (PickTaskState.RESERVED, "request_source"): (
+        PickTaskState.SOURCE_REQUESTED,
+        ["dispatch_retrieve_flow"],
+    ),
     (PickTaskState.SOURCE_REQUESTED, "source_at_cantilever"): (
         PickTaskState.SOURCE_AT_CANTILEVER,
         ["notify_k50h_ready"],
     ),
-    (PickTaskState.SOURCE_AT_CANTILEVER, "source_at_station"): (
+    (PickTaskState.SOURCE_AT_CANTILEVER, "source_picked"): (
+        PickTaskState.SOURCE_PICKED,
+        ["notify_k50h_departing"],
+    ),
+    (PickTaskState.SOURCE_PICKED, "source_at_station"): (
         PickTaskState.SOURCE_AT_STATION,
         ["activate_station_display"],
     ),
+    # Existing return flow
     (PickTaskState.SOURCE_AT_STATION, "scan_started"): (
         PickTaskState.PICKING,
         ["start_pick_timer"],
@@ -27,6 +40,11 @@ _TRANSITIONS: dict[
         ["notify_a42td_return"],
     ),
     (PickTaskState.RETURN_AT_CANTILEVER, "source_back_in_rack"): (
+        PickTaskState.COMPLETED,
+        ["emit_pick_task_completed"],
+    ),
+    # Complete at station (CV-1 route)
+    (PickTaskState.SOURCE_AT_STATION, "complete"): (
         PickTaskState.COMPLETED,
         ["emit_pick_task_completed"],
     ),

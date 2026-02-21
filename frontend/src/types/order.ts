@@ -1,10 +1,10 @@
 export type OrderStatus =
   | "NEW"
-  | "ALLOCATING"
   | "ALLOCATED"
   | "IN_PROGRESS"
   | "COMPLETED"
-  | "CANCELLED";
+  | "CANCELLED"
+  | "FAILED";
 
 export interface Order {
   id: string;

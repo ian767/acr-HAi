@@ -58,6 +58,15 @@ class SourceAtCantilever:
 
 
 @dataclass(frozen=True)
+class SourcePicked:
+    pick_task_id: uuid.UUID
+    tote_id: uuid.UUID
+    robot_id: uuid.UUID
+    event_id: uuid.UUID = field(default_factory=_new_id)
+    occurred_at: datetime = field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True)
 class SourceAtStation:
     pick_task_id: uuid.UUID
     tote_id: uuid.UUID

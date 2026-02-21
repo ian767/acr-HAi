@@ -48,6 +48,8 @@ class RobotSimulator:
         self._robots: list | None = None  # Cached robot list (loaded once)
         # Per-robot movement cooldown accumulator (seconds).
         self._move_cooldowns: dict[uuid.UUID, float] = {}
+        # Cached robot_id → task_type ("RETRIEVE" | "RETURN" | None).
+        self._robot_task_types: dict[str, str | None] = {}
 
     async def update(self, dt: float) -> None:
         """Called once per simulation tick.
@@ -69,6 +71,7 @@ class RobotSimulator:
             for r in self._robots:
                 self._traffic.reserve_cell(r.grid_row, r.grid_col, r.id)
         robots = self._robots
+        robot_map = {r.id: r for r in robots}
         position_updates: dict[str, dict] = {}
 
         import src.shared.simulation_state as simulation_state
@@ -138,6 +141,7 @@ class RobotSimulator:
                         "heading": robot.heading,
                         "status": RobotStatus.WAITING.value,
                         "path": remaining,
+                        "task_type": self._robot_task_types.get(str(robot.id)),
                     }
 
                 # Congestion-aware reroute after threshold.
@@ -146,6 +150,29 @@ class RobotSimulator:
                     and self._planner is not None
                     and self._grid is not None
                 ):
+                    # If the blocker is IDLE (no path), nudge it out of the way.
+                    blocker_id = self._traffic.occupied_cells.get(next_cell)
+                    if blocker_id is not None and blocker_id != robot.id:
+                        blocker_robot = robot_map.get(blocker_id)
+                        if blocker_robot is not None:
+                            blocker_path = await self._cache.get_path(blocker_id)
+                            if not blocker_path:
+                                await self._park_one_step(
+                                    blocker_robot,
+                                    blocker_robot.grid_row,
+                                    blocker_robot.grid_col,
+                                )
+                                logger.info(
+                                    "Nudged idle blocker %s at (%d,%d) out of way for %s",
+                                    blocker_id, blocker_robot.grid_row,
+                                    blocker_robot.grid_col, robot.id,
+                                )
+                                # Let the blocker move on the next tick before
+                                # we try to reroute — avoid overwriting its
+                                # park path on every tick.
+                                self._wait_counts[robot.id] = 0
+                                continue
+
                     congestion = self._traffic.get_congestion_map()
                     for cell, occupant in self._traffic.occupied_cells.items():
                         if occupant != robot.id:
@@ -157,10 +184,6 @@ class RobotSimulator:
                     )
                     if new_path and len(new_path) > 1:
                         await self._cache.set_path(robot.id, new_path[1:])
-                        logger.info(
-                            "Rerouted robot %s after %d waits",
-                            robot.id, self._wait_counts[robot.id],
-                        )
                     self._wait_counts[robot.id] = 0
                 continue
 
@@ -204,6 +227,7 @@ class RobotSimulator:
                 "heading": heading,
                 "status": RobotStatus.MOVING.value,
                 "path": remaining_serialized,
+                "task_type": self._robot_task_types.get(str(robot.id)),
             }
 
             # Broadcast robot.move_started event
@@ -233,15 +257,22 @@ class RobotSimulator:
                 # Emit arrival domain event based on destination cell type.
                 await self._emit_arrival_event(robot, target_row, target_col)
 
-                # If the robot is still idle at a non-FLOOR cell (cantilever,
-                # station, rack), park it on the nearest FLOOR cell so it
-                # doesn't block other robots trying to reach that cell.
-                # But skip parking if robot is WAITING_FOR_STATION (holding tote)
+                # If the robot is still idle at a high-traffic cell, park it
+                # on a nearby FLOOR cell so it doesn't block other robots.
+                # Skip if WAITING_FOR_STATION (holding tote at station).
                 new_path = await self._cache.get_path(robot.id)
                 if not new_path and self._grid is not None and robot.status != RobotStatus.WAITING_FOR_STATION:
+                    should_park = False
                     cell = self._grid[target_row][target_col]
-                    if cell in (CellType.STATION, CellType.RACK):
-                        await self._park_to_floor(robot, target_row, target_col)
+                    if cell == CellType.STATION:
+                        should_park = True
+                    # Also park away from rack_edge_row to avoid
+                    # blocking other robots heading to cantilever.
+                    import src.shared.simulation_state as _park_sim
+                    if _park_sim.rack_edge_row is not None and target_row == _park_sim.rack_edge_row:
+                        should_park = True
+                    if should_park:
+                        await self._park_one_step(robot, target_row, target_col)
 
         # ------------------------------------------------------------------
         # Auto-dispatch: assign random FLOOR destinations to IDLE robots
@@ -285,9 +316,10 @@ class RobotSimulator:
             await ws_manager.broadcast_robot_updates(position_updates)
 
         # ------------------------------------------------------------------
-        # Periodic heatmap broadcast
+        # Periodic heatmap + task-type refresh
         # ------------------------------------------------------------------
         if self._tick_counter % _HEATMAP_BROADCAST_INTERVAL == 0:
+            await self._refresh_task_types()
             await self._broadcast_heatmap()
 
     # ------------------------------------------------------------------
@@ -314,11 +346,33 @@ class RobotSimulator:
     async def _resolve_deadlock(
         self, robots: list, deadlocked_ids: list[uuid.UUID],
     ) -> None:
-        """Clear and replan the path of the robot with the shortest remaining path."""
+        """Clear and replan the path of the robot with the shortest remaining path.
+
+        If any deadlocked robot is IDLE (no path), park it away first so it
+        stops blocking the corridor.
+        """
+        robot_map = {r.id: r for r in robots}
+
+        # First pass: move any IDLE (no-path) robots out of the way.
+        for rid in deadlocked_ids:
+            robot = robot_map.get(rid)
+            if robot is None:
+                continue
+            path = await self._cache.get_path(rid)
+            if not path and self._grid is not None:
+                # IDLE robot blocking — park it on a nearby FLOOR cell.
+                await self._park_to_floor(robot, robot.grid_row, robot.grid_col)
+                parked_path = await self._cache.get_path(rid)
+                if parked_path:
+                    logger.info(
+                        "Deadlock resolved: parked idle robot %s away from (%d,%d)",
+                        rid, robot.grid_row, robot.grid_col,
+                    )
+                    return  # Resolved by moving the idle robot.
+
+        # Second pass: reroute the robot with the shortest remaining path.
         best_robot = None
         best_path_len = float("inf")
-
-        robot_map = {r.id: r for r in robots}
         for rid in deadlocked_ids:
             robot = robot_map.get(rid)
             if robot is None:
@@ -363,6 +417,34 @@ class RobotSimulator:
                 )
 
     # ------------------------------------------------------------------
+    # Task-type cache
+    # ------------------------------------------------------------------
+
+    async def _refresh_task_types(self) -> None:
+        """Refresh the robot_id → task_type mapping from active EquipmentTasks."""
+        from src.shared.database import async_session_factory
+        from src.ess.domain.models import EquipmentTask
+        from sqlalchemy import select
+
+        mapping: dict[str, str | None] = {}
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(EquipmentTask).where(
+                        EquipmentTask.state.notin_(["COMPLETED"])
+                    )
+                )
+                for task in result.scalars():
+                    task_type = task.type.value if hasattr(task.type, "value") else str(task.type)
+                    if task.a42td_robot_id:
+                        mapping[str(task.a42td_robot_id)] = task_type
+                    if task.k50h_robot_id:
+                        mapping[str(task.k50h_robot_id)] = task_type
+        except Exception:
+            return  # Keep previous mapping on error
+        self._robot_task_types = mapping
+
+    # ------------------------------------------------------------------
     # Heatmap broadcast
     # ------------------------------------------------------------------
 
@@ -392,14 +474,47 @@ class RobotSimulator:
             return
 
         cell_type = self._grid[target_row][target_col]
-        if cell_type not in (CellType.STATION, CellType.RACK):
+
+        # Since RACK is impassable, robots land on FLOOR cells adjacent to
+        # RACK.  Detect this so the rest of the handler treats it like a
+        # rack arrival.  Also treat any cell on rack_edge_row as
+        # rack-adjacent (it's the cantilever handoff row even if the
+        # specific column isn't directly touching a RACK cell).
+        import src.shared.simulation_state as _sim
+        is_rack_adjacent = False
+        if cell_type == CellType.FLOOR:
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = target_row + dr, target_col + dc
+                if 0 <= nr < len(self._grid) and 0 <= nc < len(self._grid[0]):
+                    if self._grid[nr][nc] == CellType.RACK:
+                        is_rack_adjacent = True
+                        break
+            # Any cell on rack_edge_row counts as rack-adjacent.
+            if not is_rack_adjacent and _sim.rack_edge_row is not None:
+                if target_row == _sim.rack_edge_row:
+                    is_rack_adjacent = True
+
+        if cell_type not in (CellType.STATION,) and not is_rack_adjacent:
             return
 
         # Look up the EquipmentTask assigned to this robot.
+        # IMPORTANT: collect all data inside the session, then close it
+        # BEFORE publishing events.  Event handlers open their own write
+        # sessions, and SQLite doesn't support concurrent transactions —
+        # keeping the read session open would cause "database is locked".
         from src.shared.database import async_session_factory
         from src.ess.domain.models import EquipmentTask
         from src.ess.domain.enums import EquipmentTaskType
         from sqlalchemy import select, or_
+
+        eq_pick_task_id = None
+        eq_type = None
+        eq_a42td_robot_id = None
+        eq_target_location_id = None
+        eq_source_location_id = None
+        tote_id = None
+        pick_task_state = None
+        pick_task_station_id = None
 
         async with async_session_factory() as session:
             result = await session.execute(
@@ -415,7 +530,12 @@ class RobotSimulator:
             if eq_task is None:
                 return
 
-            # Determine the pick_task's source_tote_id
+            eq_pick_task_id = eq_task.pick_task_id
+            eq_type = eq_task.type
+            eq_a42td_robot_id = eq_task.a42td_robot_id
+            eq_target_location_id = eq_task.target_location_id
+            eq_source_location_id = eq_task.source_location_id
+
             from src.wes.domain.models import PickTask
             pick_task = await session.get(PickTask, eq_task.pick_task_id)
             if pick_task is None:
@@ -425,74 +545,71 @@ class RobotSimulator:
             if tote_id is None:
                 return
 
-            from src.shared.event_bus import event_bus
-            import src.shared.simulation_state as sim_state
+            pick_task_state = pick_task.state
+            pick_task_station_id = pick_task.station_id
+        # --- session closed ---
 
-            if cell_type == CellType.STATION:
-                # K50H arriving at station with tote
-                # First emit SourcePicked (tote was picked at cantilever),
-                # then SourceAtStation
-                from src.ess.domain.events import SourcePicked, SourceAtStation
+        from src.shared.event_bus import event_bus
+        import src.shared.simulation_state as sim_state
 
-                # Emit SourcePicked if pick task is in SOURCE_AT_CANTILEVER state
-                from src.wes.domain.enums import PickTaskState
-                if pick_task.state == PickTaskState.SOURCE_AT_CANTILEVER:
-                    await event_bus.publish(SourcePicked(
-                        pick_task_id=eq_task.pick_task_id,
-                        tote_id=tote_id,
-                        robot_id=robot.id,
-                    ))
+        if cell_type == CellType.STATION:
+            from src.ess.domain.events import SourcePicked, SourceAtStation
+            from src.wes.domain.enums import PickTaskState
 
-                # Set robot to WAITING_FOR_STATION (holds tote, stays at station)
-                robot.status = RobotStatus.WAITING_FOR_STATION
-                await self._cache.update_status(
-                    robot.id, RobotStatus.WAITING_FOR_STATION.value
-                )
-
-                await event_bus.publish(SourceAtStation(
-                    pick_task_id=eq_task.pick_task_id,
+            if pick_task_state == PickTaskState.SOURCE_AT_CANTILEVER:
+                await event_bus.publish(SourcePicked(
+                    pick_task_id=eq_pick_task_id,
                     tote_id=tote_id,
-                    station_id=pick_task.station_id,
+                    robot_id=robot.id,
                 ))
 
-            elif cell_type == CellType.RACK:
-                is_edge = (
-                    sim_state.rack_edge_row is not None
-                    and target_row == sim_state.rack_edge_row
-                )
+            # Set robot to WAITING_FOR_STATION (holds tote, stays at station)
+            robot.status = RobotStatus.WAITING_FOR_STATION
+            await self._cache.update_status(
+                robot.id, RobotStatus.WAITING_FOR_STATION.value
+            )
 
-                if eq_task.type == EquipmentTaskType.RETRIEVE:
-                    if is_edge:
-                        # A42TD arrived at rack-edge (handoff point) with tote.
-                        from src.ess.domain.events import SourceAtCantilever
-                        await event_bus.publish(SourceAtCantilever(
-                            pick_task_id=eq_task.pick_task_id,
+            await event_bus.publish(SourceAtStation(
+                pick_task_id=eq_pick_task_id,
+                tote_id=tote_id,
+                station_id=pick_task_station_id,
+            ))
+
+        elif cell_type == CellType.RACK or is_rack_adjacent:
+            is_edge = (
+                sim_state.rack_edge_row is not None
+                and target_row == sim_state.rack_edge_row
+            )
+
+            if eq_type == EquipmentTaskType.RETRIEVE:
+                if is_edge:
+                    from src.ess.domain.events import SourceAtCantilever
+                    await event_bus.publish(SourceAtCantilever(
+                        pick_task_id=eq_pick_task_id,
+                        tote_id=tote_id,
+                    ))
+                else:
+                    await self._dispatch_to_rack_edge(robot, target_row, target_col)
+            elif eq_type == EquipmentTaskType.RETURN:
+                if robot.id == eq_a42td_robot_id:
+                    from src.ess.domain.events import SourceBackInRack
+                    loc_id = eq_target_location_id or eq_source_location_id
+                    if loc_id is not None:
+                        await event_bus.publish(SourceBackInRack(
+                            pick_task_id=eq_pick_task_id,
                             tote_id=tote_id,
+                            location_id=loc_id,
                         ))
-                    else:
-                        # A42TD arrived at deep rack — dispatch to rack-edge.
-                        await self._dispatch_to_rack_edge(robot, target_row, target_col)
-                elif eq_task.type == EquipmentTaskType.RETURN:
-                    # Distinguish which robot arrived:
-                    # - A42TD arriving = delivering tote to rack → SourceBackInRack
-                    # - K50H arriving at rack-edge = handoff → ReturnAtCantilever
-                    if robot.id == eq_task.a42td_robot_id:
-                        # A42TD completing return delivery (even if on rack-edge row).
-                        from src.ess.domain.events import SourceBackInRack
-                        loc_id = eq_task.target_location_id or eq_task.source_location_id
-                        if loc_id is not None:
-                            await event_bus.publish(SourceBackInRack(
-                                pick_task_id=eq_task.pick_task_id,
-                                tote_id=tote_id,
-                                location_id=loc_id,
-                            ))
-                    elif is_edge:
-                        # K50H arrived at rack-edge for return handoff.
-                        from src.ess.domain.events import ReturnAtCantilever
-                        await event_bus.publish(ReturnAtCantilever(
-                            pick_task_id=eq_task.pick_task_id,
-                            tote_id=tote_id,
-                        ))
+                elif is_edge or is_rack_adjacent:
+                    # K50H arrived at cantilever area. Accept both exact
+                    # rack_edge_row and any rack-adjacent FLOOR cell so the
+                    # RETURN flow doesn't silently stall if the robot lands
+                    # one row off due to path-planning variation.
+                    from src.ess.domain.events import ReturnAtCantilever
+                    await event_bus.publish(ReturnAtCantilever(
+                        pick_task_id=eq_pick_task_id,
+                        tote_id=tote_id,
+                    ))
 
     async def _dispatch_to_rack_edge(
         self, robot, from_row: int, from_col: int
@@ -503,28 +620,34 @@ class RobotSimulator:
 
         import src.shared.simulation_state as sim_state
 
-        # Find the nearest RACK cell on the rack_edge_row.
+        # Find the nearest FLOOR cell on the rack_edge_row (cantilever aisle).
         best: tuple[int, int] | None = None
         best_dist = float("inf")
 
         if sim_state.rack_edge_row is not None:
             edge_row = sim_state.rack_edge_row
             for c in range(len(self._grid[0])):
-                if edge_row < len(self._grid) and self._grid[edge_row][c] == CellType.RACK:
+                if edge_row < len(self._grid) and self._grid[edge_row][c] == CellType.FLOOR:
                     dist = abs(edge_row - from_row) + abs(c - from_col)
                     if dist < best_dist:
                         best_dist = dist
                         best = (edge_row, c)
 
-        # Fallback: find the RACK cell with the largest row number (bottom edge).
+        # Fallback: find the FLOOR cell adjacent to the bottom-most RACK row.
         if best is None:
             for r in range(len(self._grid) - 1, -1, -1):
                 for c in range(len(self._grid[0])):
-                    if self._grid[r][c] == CellType.RACK:
-                        dist = abs(r - from_row) + abs(c - from_col)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best = (r, c)
+                    if self._grid[r][c] == CellType.FLOOR:
+                        # Check if adjacent to a RACK cell
+                        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < len(self._grid) and 0 <= nc < len(self._grid[0]):
+                                if self._grid[nr][nc] == CellType.RACK:
+                                    dist = abs(r - from_row) + abs(c - from_col)
+                                    if dist < best_dist:
+                                        best_dist = dist
+                                        best = (r, c)
+                                    break
                 if best is not None:
                     break
 
@@ -546,29 +669,66 @@ class RobotSimulator:
     # Idle parking
     # ------------------------------------------------------------------
 
+    async def _park_one_step(
+        self, robot, from_row: int, from_col: int,
+    ) -> None:
+        """Move an idle robot exactly ONE cell to a free adjacent FLOOR cell.
+
+        Unlike ``_park_to_floor`` this never plans a multi-step path, so it
+        cannot create new corridor congestion or deadlocks.
+        """
+        if self._grid is None:
+            return
+        import src.shared.simulation_state as _park_sim
+        rows = len(self._grid)
+        cols = len(self._grid[0])
+        # Try the 4 cardinal neighbours; prefer cells away from rack_edge_row.
+        candidates: list[tuple[int, int]] = []
+        for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            nr, nc = from_row + dr, from_col + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                if self._grid[nr][nc] != CellType.FLOOR:
+                    continue
+                # Skip rack_edge_row (high-traffic)
+                if _park_sim.rack_edge_row is not None and nr == _park_sim.rack_edge_row:
+                    continue
+                # Skip occupied cells
+                if (nr, nc) in self._traffic.occupied_cells:
+                    continue
+                candidates.append((nr, nc))
+        if candidates:
+            target = candidates[0]
+            await self._cache.set_path(robot.id, [target])
+
     async def _park_to_floor(
         self, robot, from_row: int, from_col: int,
     ) -> None:
         """Move an idle robot off a key cell to the nearest FLOOR cell."""
         if self._grid is None:
             return
+        import src.shared.simulation_state as _park_sim
         rows = len(self._grid)
         cols = len(self._grid[0])
         # Expand outward by Manhattan distance to find closest FLOOR.
+        # Avoid rack_edge_row (high-traffic corridor) and STATION cells.
         for dist in range(1, max(rows, cols)):
             for dr in range(-dist, dist + 1):
                 dc_abs = dist - abs(dr)
                 for dc in ([-dc_abs, dc_abs] if dc_abs else [0]):
                     nr, nc = from_row + dr, from_col + dc
                     if 0 <= nr < rows and 0 <= nc < cols:
-                        if self._grid[nr][nc] == CellType.FLOOR:
-                            planner = PathPlanner(self._grid)
-                            path = planner.find_path(
-                                (from_row, from_col), (nr, nc),
-                            )
-                            if path and len(path) > 1:
-                                await self._cache.set_path(robot.id, path[1:])
-                                return
+                        if self._grid[nr][nc] != CellType.FLOOR:
+                            continue
+                        # Skip rack_edge_row (high-traffic)
+                        if _park_sim.rack_edge_row is not None and nr == _park_sim.rack_edge_row:
+                            continue
+                        planner = PathPlanner(self._grid)
+                        path = planner.find_path(
+                            (from_row, from_col), (nr, nc),
+                        )
+                        if path and len(path) > 1:
+                            await self._cache.set_path(robot.id, path[1:])
+                            return
 
     # ------------------------------------------------------------------
     # Helpers

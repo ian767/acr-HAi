@@ -1,4 +1,5 @@
 import { useWarehouseStore } from "../stores/useWarehouseStore";
+import { Sound } from "../utils/sounds";
 import type { Station } from "../types/station";
 import type { PickTask } from "../types/pickTask";
 import type { Order } from "../types/order";
@@ -25,6 +26,17 @@ const handlers: Record<string, MessageHandler> = {
     useWarehouseStore.getState().updatePickTask(payload as PickTask);
   },
 
+  "pick_task.updated": (payload) => {
+    const data = payload as { pick_task_id?: string; new_state?: string } & Partial<PickTask>;
+    if (data.pick_task_id && data.new_state) {
+      // Status-only update from event handlers.
+      useWarehouseStore.getState().updatePickTaskStatus(data.pick_task_id, data.new_state);
+    } else if (data.id) {
+      // Full PickTask object.
+      useWarehouseStore.getState().updatePickTask(data as PickTask);
+    }
+  },
+
   "kpi.updated": (payload) => {
     useWarehouseStore.getState().updateKPI(payload as KPIPayload);
   },
@@ -39,12 +51,74 @@ const handlers: Record<string, MessageHandler> = {
   },
 
   "order.updated": (payload) => {
-    useWarehouseStore.getState().updateOrder(payload as Order);
+    const data = payload as { order_id?: string; status?: string } & Partial<Order>;
+    if (data.order_id && data.status) {
+      // Partial update from event handlers.
+      useWarehouseStore.getState().upsertOrderPartial(data as {
+        order_id: string;
+        status: string;
+        external_id?: string;
+        sku?: string;
+        quantity?: number;
+        station_id?: string;
+      });
+    } else if (data.id) {
+      // Full Order object.
+      useWarehouseStore.getState().updateOrder(data as Order);
+    }
   },
 
   "heatmap.updated": (payload) => {
     const { cells } = payload as { cells: Record<string, number> };
     useWarehouseStore.getState().updateHeatmap(cells);
+  },
+
+  // ----- New logic.md required events -----
+
+  "order.status_changed": (payload) => {
+    const data = payload as { orderId: string; status: string };
+    useWarehouseStore.getState().upsertOrderPartial({
+      order_id: data.orderId,
+      status: data.status,
+    });
+  },
+
+  "pickTask.state_changed": (payload) => {
+    const data = payload as {
+      pickTaskId: string;
+      orderId?: string;
+      stationId?: string;
+      from: string;
+      to: string;
+    };
+    useWarehouseStore.getState().updatePickTaskStatus(data.pickTaskId, data.to);
+  },
+
+  "robot.move_started": (_payload) => {
+    // Visual feedback handled by robot.updated; log for debug.
+  },
+
+  "robot.move_denied": (_payload) => {
+    // Could display alert; currently no-op.
+  },
+
+  "robot.target_reached": (_payload) => {
+    // Visual feedback handled by robot.updated; log for debug.
+  },
+
+  "station.ready": (payload) => {
+    const data = payload as { stationId: string; pickTaskId?: string };
+    // Update station status to ACTIVE when ready for scanning
+    const stations = useWarehouseStore.getState().stations;
+    const station = stations.find((s) => s.id === data.stationId);
+    if (station) {
+      useWarehouseStore.getState().updateStation({
+        ...station,
+        status: "ACTIVE",
+      });
+    }
+    // Play robot arrival sound
+    Sound.robotArrived();
   },
 };
 

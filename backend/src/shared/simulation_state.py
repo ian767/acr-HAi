@@ -28,11 +28,15 @@ robot_speed: dict[str, float] = {
 # point (formerly "cantilever row") between A42TD and K50H robots.
 rack_edge_row: int | None = None
 
+# Order counter for sequential external IDs (wob_sh_bx0001, 0002, ...)
+order_counter: int = 0
+
 
 def reset() -> None:
     """Reset simulation state (for test isolation)."""
     global grid, traffic, auto_dispatch, wes_driven, order_rate
     global station_processing_ticks, zone_id, interactive_mode, rack_edge_row
+    global order_counter
     grid = None
     traffic = TrafficController()
     auto_dispatch = False
@@ -42,3 +46,4 @@ def reset() -> None:
     zone_id = None
     interactive_mode = False
     rack_edge_row = None
+    order_counter = 0

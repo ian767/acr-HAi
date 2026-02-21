@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,11 +48,14 @@ class PickTask(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     target_tote_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    target_tote_barcode: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
     put_wall_slot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("put_wall_slots.id"), nullable=True
     )
     state: Mapped[PickTaskState] = mapped_column(
-        Enum(PickTaskState), default=PickTaskState.SOURCE_REQUESTED, nullable=False
+        Enum(PickTaskState), default=PickTaskState.CREATED, nullable=False
     )
     assigned_robot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("robots.id"), nullable=True
@@ -76,6 +79,16 @@ class Station(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     max_queue_size: Mapped[int] = mapped_column(Integer, default=6)
 
+    # Station queue cell positions
+    approach_cell_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approach_cell_col: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    holding_cell_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    holding_cell_col: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    queue_cells_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_robot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+
     put_wall_slots: Mapped[list["PutWallSlot"]] = relationship(back_populates="station")
 
 
@@ -89,6 +102,9 @@ class PutWallSlot(UUIDPrimaryKeyMixin, Base):
     target_tote_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    target_tote_barcode: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     station: Mapped["Station"] = relationship(back_populates="put_wall_slots")
@@ -98,8 +114,10 @@ class Inventory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "inventory"
 
     sku: Mapped[str] = mapped_column(String(50), nullable=False)
-    zone_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("zones.id"), nullable=False
+    sku_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    band: Mapped[str] = mapped_column(String(1), default="C", nullable=False)
+    zone_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("zones.id"), nullable=True
     )
     total_qty: Mapped[int] = mapped_column(Integer, default=0)
     allocated_qty: Mapped[int] = mapped_column(Integer, default=0)

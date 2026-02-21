@@ -72,6 +72,8 @@ class PickTaskOut(BaseModel):
     qty_picked: int
     source_tote_id: uuid.UUID | None = None
     target_tote_id: uuid.UUID | None = None
+    target_tote_barcode: str | None = None
+    put_wall_slot_id: uuid.UUID | None = None
     state: str
 
     model_config = {"from_attributes": True}
@@ -145,7 +147,9 @@ async def create_order(body: CreateOrderBody, session: SessionDep):
         )
 
     svc = OrderService(session)
-    ext_id = body.external_id or f"ORD-{uuid.uuid4().hex[:8].upper()}"
+    import src.shared.simulation_state as sim_state
+    sim_state.order_counter += 1
+    ext_id = body.external_id or f"wob_sh_bx{sim_state.order_counter:04d}"
     order = await svc.create_order(
         external_id=ext_id,
         sku=body.sku,
@@ -322,6 +326,20 @@ async def scan_item(
     from src.shared.event_bus import event_bus
     for evt in svc.collect_events():
         await event_bus.publish(evt)
+
+    # When all items picked (auto-transition to RETURN_REQUESTED), trigger
+    # the return flow so the source tote goes back to the rack.
+    if task.state == PickTaskState.RETURN_REQUESTED and task.source_tote_id:
+        from src.ess.domain.models import Tote
+        source_tote = await session.get(Tote, task.source_tote_id)
+        if source_tote is not None and source_tote.home_location_id is not None:
+            from src.wes.domain.events import ReturnSourceTote
+            await event_bus.publish(ReturnSourceTote(
+                pick_task_id=task.id,
+                tote_id=task.source_tote_id,
+                target_location_id=source_tote.home_location_id,
+                station_id=station_id,
+            ))
 
     return task
 
@@ -516,6 +534,29 @@ async def bind_target_tote(
         )
 
     task.target_tote_id = target_id
+    # Resolve barcode for display
+    if body.target_tote_barcode:
+        task.target_tote_barcode = body.target_tote_barcode
+    else:
+        from src.ess.domain.models import Tote as ToteModel
+        tote_obj = await session.get(ToteModel, target_id)
+        task.target_tote_barcode = tote_obj.barcode if tote_obj else None
+
+    # Link to matching putwall slot (critical for slot display + tote-full)
+    if task.put_wall_slot_id is None:
+        from src.wes.domain.models import PutWallSlot
+        slot_result = await session.execute(
+            select(PutWallSlot).where(
+                PutWallSlot.station_id == station_id,
+                PutWallSlot.target_tote_id == target_id,
+                PutWallSlot.is_locked == False,  # noqa: E712
+            ).limit(1)
+        )
+        matching_slot = slot_result.scalar_one_or_none()
+        if matching_slot is not None:
+            task.put_wall_slot_id = matching_slot.id
+            matching_slot.is_locked = True
+
     await session.commit()
     return task
 
@@ -539,10 +580,144 @@ async def handle_tote_full(
             detail="Pick task does not belong to this station",
         )
 
-    # Clear target tote so operator must bind a new one
+    # Clear target tote so operator can bind a new one
     task.target_tote_id = None
+
+    # Clear the put-wall slot (unbind tote, unlock)
+    if task.put_wall_slot_id:
+        from src.wes.domain.models import PutWallSlot
+        slot = await session.get(PutWallSlot, task.put_wall_slot_id)
+        if slot is not None:
+            slot.target_tote_id = None
+            slot.target_tote_barcode = None
+            slot.is_locked = False
+        task.put_wall_slot_id = None
+
+    # Determine if all picks are done.
+    from src.wes.domain.enums import PickTaskState
+    all_picked = task.qty_picked >= task.qty_to_pick and task.qty_to_pick > 0
+    already_returning = task.state == PickTaskState.RETURN_REQUESTED
+
+    # Only trigger return flow if all picks are done (or already in return state).
+    # If tote is just full but picks remain, operator needs a new target tote.
+    if (all_picked or already_returning) and task.source_tote_id:
+        # Transition to RETURN_REQUESTED if still in PICKING
+        if task.state == PickTaskState.PICKING:
+            from src.wes.domain.state_machines.pick_task_sm import pick_task_sm
+            new_state, _side_effects = pick_task_sm.transition(task.state, "pick_complete")
+            task.state = new_state
+
+        # Only publish ReturnSourceTote if no RETURN equipment task exists yet
+        from sqlalchemy import select
+        from src.ess.domain.models import EquipmentTask as EqTask
+        from src.ess.domain.enums import EquipmentTaskType
+        existing_return = await session.execute(
+            select(EqTask).where(
+                EqTask.pick_task_id == task.id,
+                EqTask.type == EquipmentTaskType.RETURN,
+            ).limit(1)
+        )
+        if existing_return.scalar_one_or_none() is None:
+            from src.ess.domain.models import Tote as ToteModel
+            source_tote = await session.get(ToteModel, task.source_tote_id)
+            if source_tote is not None and source_tote.home_location_id is not None:
+                from src.wes.domain.events import ReturnSourceTote
+                from src.shared.event_bus import event_bus
+                await event_bus.publish(ReturnSourceTote(
+                    pick_task_id=task.id,
+                    tote_id=task.source_tote_id,
+                    target_location_id=source_tote.home_location_id,
+                    station_id=station_id,
+                ))
+
     await session.commit()
     return task
+
+
+# ---------------------------------------------------------------------------
+# Put-Wall Slots
+# ---------------------------------------------------------------------------
+
+
+class PutWallSlotOut(BaseModel):
+    id: uuid.UUID
+    station_id: uuid.UUID
+    slot_label: str
+    target_tote_id: uuid.UUID | None = None
+    target_tote_barcode: str | None = None
+    is_locked: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class BindSlotBody(BaseModel):
+    slot_id: uuid.UUID
+    tote_barcode: str
+
+
+@router.get("/stations/{station_id}/putwall", response_model=list[PutWallSlotOut])
+async def get_putwall(station_id: uuid.UUID, session: SessionDep):
+    """Return putwall slot state for a station."""
+    from src.wes.domain.models import PutWallSlot
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(PutWallSlot)
+        .where(PutWallSlot.station_id == station_id)
+        .order_by(PutWallSlot.slot_label)
+    )
+    return list(result.scalars().all())
+
+
+@router.post(
+    "/stations/{station_id}/putwall/bind-slot", response_model=PutWallSlotOut
+)
+async def bind_putwall_slot(
+    station_id: uuid.UUID,
+    body: BindSlotBody,
+    session: SessionDep,
+):
+    """Bind a tote to a specific putwall slot (independent of tasks)."""
+    from src.wes.domain.models import PutWallSlot
+    from src.ess.domain.models import Tote
+    from sqlalchemy import select
+
+    slot = await session.get(PutWallSlot, body.slot_id)
+    if slot is None:
+        raise HTTPException(status_code=404, detail="Slot not found")
+    if slot.station_id != station_id:
+        raise HTTPException(
+            status_code=400, detail="Slot does not belong to this station"
+        )
+
+    # Look up or create tote by barcode
+    result = await session.execute(
+        select(Tote).where(Tote.barcode == body.tote_barcode).limit(1)
+    )
+    tote = result.scalar_one_or_none()
+    if tote is None:
+        tote = Tote(barcode=body.tote_barcode, sku=None, quantity=0)
+        session.add(tote)
+        await session.flush()
+
+    # Prevent same tote in multiple active slots at this station
+    existing = await session.execute(
+        select(PutWallSlot).where(
+            PutWallSlot.station_id == station_id,
+            PutWallSlot.target_tote_id == tote.id,
+            PutWallSlot.id != slot.id,
+        ).limit(1)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="This tote is already bound to another slot at this station",
+        )
+
+    slot.target_tote_id = tote.id
+    slot.target_tote_barcode = body.tote_barcode
+    await session.commit()
+    return slot
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { WebSocketProvider } from "./websocket/WebSocketProvider";
 
 const DashboardPage = lazy(() => import("./features/dashboard/DashboardPage"));
 const OrderManagementPage = lazy(() => import("./features/wes/OrderManagementPage"));
+const InventoryPage = lazy(() => import("./features/wes/InventoryPage"));
 const StationManagementPage = lazy(() => import("./features/wes/StationManagementPage"));
 const PickTaskMonitorPage = lazy(() => import("./features/wes/PickTaskMonitorPage"));
 const WarehouseMapPage = lazy(() =>
@@ -20,8 +21,9 @@ const MetricsPage = lazy(() => import("./features/monitoring/MetricsPage"));
 const NAV_ITEMS = [
   { path: "/dashboard", label: "Dashboard" },
   { path: "/wes/orders", label: "Orders" },
+  { path: "/wes/inventory", label: "Inventory" },
   { path: "/wes/stations", label: "Stations" },
-  { path: "/wes/pick-tasks", label: "Pick Tasks" },
+  { path: "/wes/pick-tasks", label: "Fulfillment" },
   { path: "/ess/map", label: "Map" },
   { path: "/ess/robots", label: "Robots" },
   { path: "/monitoring/alarms", label: "Alarms" },
@@ -99,6 +101,7 @@ export default function App() {
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<DashboardPage />} />
                 <Route path="/wes/orders" element={<OrderManagementPage />} />
+                <Route path="/wes/inventory" element={<InventoryPage />} />
                 <Route path="/wes/stations" element={<StationManagementPage />} />
                 <Route path="/wes/pick-tasks" element={<PickTaskMonitorPage />} />
                 <Route path="/ess/map" element={<WarehouseMapPage />} />
