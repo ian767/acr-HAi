@@ -246,6 +246,17 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
     [handleScan],
   );
 
+  // Dispatch retrieve (manual tote pull)
+  const handleDispatch = useCallback(async (pickTaskId: string) => {
+    try {
+      await wesApi.dispatchRetrieve(pickTaskId);
+      triggerFlash("success", "Tote pull dispatched");
+      wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
+    } catch (err: any) {
+      triggerFlash("error", err.message || "Dispatch failed");
+    }
+  }, [stationId, triggerFlash]);
+
   // Step 1: Scan target tote barcode → sets pendingToteBarcode (does NOT auto-bind).
   const handleScanTote = useCallback(() => {
     if (!toteBarcode.trim()) return;
@@ -356,6 +367,7 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
             completedTasks={completedTasks}
             orders={orders}
             pickTasks={pickTasks}
+            onDispatch={handleDispatch}
           />
         </div>
 
@@ -536,12 +548,14 @@ function TopRightTaskQueue({
   completedTasks,
   orders,
   pickTasks,
+  onDispatch,
 }: {
   activeTask: PickTask | null;
   pendingTasks: PickTask[];
   returningTasks: PickTask[];
   completedTasks: PickTask[];
   orders: Order[];
+  onDispatch: (pickTaskId: string) => void;
   pickTasks: PickTask[];
 }) {
   const orderForTask = (taskOrderId: string) =>
@@ -631,8 +645,29 @@ function TopRightTaskQueue({
                 <span>{task.qty_picked}/{task.qty_to_pick} ({pct}%)</span>
               </div>
 
+              {/* Pull Tote button for SOURCE_REQUESTED tasks */}
+              {task.state === "SOURCE_REQUESTED" && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDispatch(task.id); }}
+                  style={{
+                    marginTop: 6,
+                    width: "100%",
+                    padding: "5px 0",
+                    background: "#eab308",
+                    color: "#000",
+                    border: "none",
+                    borderRadius: 4,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Pull Tote
+                </button>
+              )}
+
               {/* Mini progress bar */}
-              {task.state !== "COMPLETED" && (
+              {task.state !== "COMPLETED" && task.state !== "SOURCE_REQUESTED" && (
                 <div style={{ height: 2, background: "#2d3148", borderRadius: 1, marginTop: 4, overflow: "hidden" }}>
                   <div
                     style={{

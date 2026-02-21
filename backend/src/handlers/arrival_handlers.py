@@ -530,7 +530,32 @@ async def _handle_source_at_station(event) -> None:
         from sqlalchemy import select
 
         pts = PickTaskService(session)
-        await pts.transition_state(event.pick_task_id, "source_at_station")
+
+        # Catch-up: if intermediate states were skipped (e.g. K50H arrived
+        # at station before SourceAtCantilever/SourcePicked were processed),
+        # advance through all missing states so the pick task reaches
+        # SOURCE_AT_STATION regardless of its current position.
+        from src.wes.domain.enums import PickTaskState
+        from src.wes.domain.models import PickTask
+        pt = await session.get(PickTask, event.pick_task_id)
+        if pt is not None:
+            catchup_events = {
+                PickTaskState.SOURCE_REQUESTED: ["source_at_cantilever", "source_picked", "source_at_station"],
+                PickTaskState.SOURCE_AT_CANTILEVER: ["source_picked", "source_at_station"],
+                PickTaskState.SOURCE_PICKED: ["source_at_station"],
+            }
+            events_needed = catchup_events.get(pt.state, [])
+            if events_needed:
+                if len(events_needed) > 1:
+                    logger.info(
+                        "SourceAtStation catch-up: pick_task %s in %s, advancing through %s",
+                        event.pick_task_id, pt.state.value, events_needed,
+                    )
+                for ev in events_needed:
+                    await pts.transition_state(event.pick_task_id, ev)
+            # Already at SOURCE_AT_STATION or beyond — skip transition
+        else:
+            await pts.transition_state(event.pick_task_id, "source_at_station")
 
         for evt in pts.collect_events():
             await event_bus.publish(evt)

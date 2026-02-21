@@ -271,6 +271,44 @@ async def get_pick_task(pick_task_id: uuid.UUID, session: SessionDep):
     return task
 
 
+@router.post("/pick-tasks/{pick_task_id}/dispatch", response_model=PickTaskOut)
+async def dispatch_retrieve(
+    pick_task_id: uuid.UUID,
+    session: SessionDep,
+):
+    """Manually trigger tote pull (RETRIEVE) for a pick task in SOURCE_REQUESTED state."""
+    from src.wes.domain.enums import PickTaskState
+    from src.wes.domain.models import PickTask
+    from src.ess.domain.models import Tote
+    from src.wes.domain.events import RetrieveSourceTote
+    from src.shared.event_bus import event_bus
+
+    pt = await session.get(PickTask, pick_task_id)
+    if pt is None:
+        raise HTTPException(status_code=404, detail="Pick task not found")
+    if pt.state != PickTaskState.SOURCE_REQUESTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pick task must be in SOURCE_REQUESTED state (current: {pt.state.value})",
+        )
+    if pt.source_tote_id is None:
+        raise HTTPException(status_code=400, detail="No source tote assigned")
+
+    tote = await session.get(Tote, pt.source_tote_id)
+    if tote is None or tote.current_location_id is None:
+        raise HTTPException(status_code=400, detail="Source tote has no location")
+
+    await event_bus.publish(RetrieveSourceTote(
+        pick_task_id=pt.id,
+        tote_id=tote.id,
+        source_location_id=tote.current_location_id,
+        station_id=pt.station_id,
+    ))
+
+    await session.refresh(pt)
+    return pt
+
+
 @router.post("/stations/{station_id}/scan", response_model=PickTaskOut)
 async def scan_item(
     station_id: uuid.UUID,

@@ -42,6 +42,9 @@ export const wesApi = {
 
   getPickTask: (id: string) => api.get<PickTask>(`/wes/pick-tasks/${id}`),
 
+  dispatchRetrieve: (pickTaskId: string) =>
+    api.post<PickTask>(`/wes/pick-tasks/${pickTaskId}/dispatch`),
+
   scanItem: (stationId: string, pickTaskId: string) =>
     api.post<PickTask>(`/wes/stations/${stationId}/scan`, { pick_task_id: pickTaskId }),
 

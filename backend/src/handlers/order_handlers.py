@@ -82,8 +82,9 @@ async def _handle_order_allocated(event) -> None:
             await session.flush()
 
             # Transition CREATED -> RESERVED -> SOURCE_REQUESTED
-            # K50H reservation happens later when it picks up the tote
-            # at the cantilever (via _handle_source_at_cantilever).
+            # Tote pull (RetrieveSourceTote) is NOT auto-dispatched here.
+            # The operator must manually trigger it via the "Pull Tote"
+            # button (POST /wes/pick-tasks/{id}/dispatch).
             await pts.transition_state(pick_task.id, "reserve")
             await pts.transition_state(pick_task.id, "request_source")
 
@@ -91,13 +92,6 @@ async def _handle_order_allocated(event) -> None:
                 await event_bus.publish(evt)
 
             await session.commit()
-
-            await event_bus.publish(RetrieveSourceTote(
-                pick_task_id=pick_task.id,
-                tote_id=tote.id,
-                source_location_id=tote.current_location_id,
-                station_id=event.station_id,
-            ))
         else:
             logger.warning("No tote found for SKU %s", order.sku)
             await session.commit()
