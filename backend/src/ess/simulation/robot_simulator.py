@@ -93,6 +93,9 @@ class RobotSimulator:
             Elapsed simulation time in seconds for this tick (used for
             interpolation weighting, currently one discrete step per tick).
         """
+        import time as _time_mod
+        _tick_start = _time_mod.monotonic()
+
         self._tick_counter += 1
         from src.wes.application.station_queue_service import set_current_tick
         set_current_tick(self._tick_counter)
@@ -135,11 +138,16 @@ class RobotSimulator:
         import src.shared.simulation_state as _park_sim  # alias used by parking/reroute logic
         speed_cfg = simulation_state.robot_speed
 
+        # Pre-fetch ALL robot paths in a single Redis pipeline call.
+        # This replaces ~2×N individual get_path() round-trips per tick.
+        _all_ids = [r.id for r in robots]
+        path_cache = await self._cache.get_paths_batch(_all_ids)
+
         for robot in robots:
             # Skip robots waiting at station UNLESS they now have a path
             # (meaning the return flow has started and released them).
             if robot.status == RobotStatus.WAITING_FOR_STATION:
-                path = await self._cache.get_path(robot.id)
+                path = path_cache.get(robot.id, [])
                 if path:
                     # Return flow started — sync status to MOVING everywhere.
                     robot.status = RobotStatus.MOVING
@@ -170,7 +178,7 @@ class RobotSimulator:
                 else:
                     continue
 
-            path = await self._cache.get_path(robot.id)
+            path = path_cache.get(robot.id, [])
             if not path:
                 robot._next_cell = None  # type: ignore[attr-defined]
                 # A WAITING robot with no path is stuck — reset to IDLE
@@ -304,6 +312,7 @@ class RobotSimulator:
                     robot.name, robot.grid_row, robot.grid_col, target_row, target_col,
                 )
                 await self._cache.set_path(robot.id, [])
+                path_cache[robot.id] = []
                 robot._next_cell = None  # type: ignore[attr-defined]
                 continue
 
@@ -476,6 +485,7 @@ class RobotSimulator:
                     )
                     if new_path and len(new_path) > 1:
                         await self._cache.set_path(robot.id, new_path[1:])
+                        path_cache[robot.id] = new_path[1:]
                         logger.info(
                             "Rerouted %s around blocked cell (%d,%d) [%s by %s, age=%s] → %d steps",
                             robot.name, next_cell[0], next_cell[1],
@@ -572,6 +582,7 @@ class RobotSimulator:
             # Consume the waypoint.
             remaining_path = path[1:]
             await self._cache.set_path(robot.id, remaining_path)
+            path_cache[robot.id] = remaining_path
 
             # --- K50H tote pickup at cantilever (any rack-adjacent cell) ---
             # When a K50H with a reservation (but no tote) steps onto a
@@ -713,7 +724,7 @@ class RobotSimulator:
             and self._grid
         ):
             for robot in robots:
-                path = await self._cache.get_path(robot.id)
+                path = path_cache.get(robot.id, [])
                 if path or robot.status != RobotStatus.IDLE:
                     continue
                 goal = self._random_floor_cell()
@@ -724,6 +735,7 @@ class RobotSimulator:
                     )
                     if new_path and len(new_path) > 1:
                         await self._cache.set_path(robot.id, new_path[1:])
+                        path_cache[robot.id] = new_path[1:]
                         logger.debug(
                             "Auto-dispatch robot %s -> (%d, %d)",
                             robot.id, goal[0], goal[1],
@@ -852,6 +864,14 @@ class RobotSimulator:
                 _rd["target_station"] = getattr(r, "_target_station", None)
             _live[str(r.id)] = _rd
         simulation_state.robot_positions = _live
+
+        # Tick timing: log every 50 ticks to avoid log spam.
+        _tick_elapsed_ms = (_time_mod.monotonic() - _tick_start) * 1000
+        if self._tick_counter % 50 == 0 or _tick_elapsed_ms > 500:
+            logger.info(
+                "Tick %d: %.1fms (%d robots)",
+                self._tick_counter, _tick_elapsed_ms, len(robots),
+            )
 
     # ------------------------------------------------------------------
     # Territory helpers
@@ -1782,25 +1802,40 @@ class RobotSimulator:
         This ensures that REST endpoints (``GET /ess/robots``), snapshot
         broadcasts, and every other code path return the live in-memory
         positions instead of stale creation-time defaults.
+
+        Uses a single bulk UPDATE with bindparam instead of N individual
+        queries (~300 queries → 1 bulk query).
         """
+        if not robots:
+            return
         try:
             from src.shared.database import async_session_factory as _asf_sync
             from src.ess.domain.models import Robot as _RobotSync
-            from sqlalchemy import update as _sql_update
+            from sqlalchemy import update as _sql_update, bindparam as _bp
+
+            params = [
+                {
+                    "_rid": r.id,
+                    "_row": r.grid_row,
+                    "_col": r.grid_col,
+                    "_heading": r.heading,
+                    "_status": r.status,
+                }
+                for r in robots
+            ]
 
             async with _asf_sync() as _sync_sess:
-                for r in robots:
-                    _st = r.status.value if hasattr(r.status, "value") else str(r.status)
-                    await _sync_sess.execute(
-                        _sql_update(_RobotSync)
-                        .where(_RobotSync.id == r.id)
-                        .values(
-                            grid_row=r.grid_row,
-                            grid_col=r.grid_col,
-                            heading=r.heading,
-                            status=r.status,
-                        )
-                    )
+                await _sync_sess.execute(
+                    _sql_update(_RobotSync)
+                    .where(_RobotSync.id == _bp("_rid"))
+                    .values(
+                        grid_row=_bp("_row"),
+                        grid_col=_bp("_col"),
+                        heading=_bp("_heading"),
+                        status=_bp("_status"),
+                    ),
+                    params,
+                )
                 await _sync_sess.commit()
         except Exception:
             logger.debug("DB position sync failed (non-critical)")

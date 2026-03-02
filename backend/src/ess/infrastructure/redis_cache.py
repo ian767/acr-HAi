@@ -157,6 +157,28 @@ class RobotStateCache:
         data = json.loads(raw)
         return [(int(r), int(c)) for r, c in data]
 
+    async def get_paths_batch(
+        self, robot_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[tuple[int, int]]]:
+        """Retrieve planned paths for many robots in a single Redis pipeline.
+
+        Returns a dict mapping each robot_id to its path (empty list if none).
+        """
+        if not robot_ids:
+            return {}
+        pipeline = self._redis.pipeline(transaction=False)
+        for rid in robot_ids:
+            pipeline.get(f"robot:{rid}:path")
+        results = await pipeline.execute()
+        out: dict[uuid.UUID, list[tuple[int, int]]] = {}
+        for rid, raw in zip(robot_ids, results):
+            if raw is None:
+                out[rid] = []
+            else:
+                data = json.loads(raw)
+                out[rid] = [(int(r), int(c)) for r, c in data]
+        return out
+
     # ------------------------------------------------------------------
     # Reservation
     # ------------------------------------------------------------------
