@@ -45,6 +45,28 @@ class RobotStateCache:
         key = f"robot:{robot_id}"
         await self._redis.hset(key, "status", status)
 
+    async def get_position_safe(
+        self, robot_id: uuid.UUID,
+    ) -> tuple[int, int] | None:
+        """Return ``(row, col)`` only if Redis actually has position fields.
+
+        Returns ``None`` if the hash exists but only has non-position fields
+        (e.g. status was set before position).  This prevents returning a
+        spurious ``(0, 0)`` default.
+        """
+        key = f"robot:{robot_id}"
+        raw = await self._redis.hgetall(key)
+        if not raw:
+            return None
+        # Check that "row" genuinely exists in the hash (not defaulting to 0).
+        has_row = "row" in raw or b"row" in raw
+        has_col = "col" in raw or b"col" in raw
+        if not has_row or not has_col:
+            return None
+        row_val = raw.get("row") or raw.get(b"row")
+        col_val = raw.get("col") or raw.get(b"col")
+        return (int(row_val), int(col_val))
+
     async def get_state(self, robot_id: uuid.UUID) -> dict:
         """Return the full state hash for one robot.
 
@@ -54,13 +76,16 @@ class RobotStateCache:
         raw = await self._redis.hgetall(key)
         if not raw:
             return {}
+        # Safely handle both str and bytes keys from Redis.
+        def _get(field: str, default=None):
+            return raw.get(field, raw.get(field.encode(), default))
         state = {
             "robot_id": str(robot_id),
-            "row": int(raw.get("row", 0)),
-            "col": int(raw.get("col", 0)),
-            "heading": float(raw.get("heading", 0.0)),
-            "status": raw.get("status", ""),
-            "zone_id": raw.get("zone_id", ""),
+            "row": int(_get("row", 0)),
+            "col": int(_get("col", 0)),
+            "heading": float(_get("heading", 0.0)),
+            "status": _get("status", ""),
+            "zone_id": _get("zone_id", ""),
         }
         # Include reservation/tote fields if present
         if raw.get("reserved"):

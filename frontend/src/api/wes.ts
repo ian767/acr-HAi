@@ -42,9 +42,6 @@ export const wesApi = {
 
   getPickTask: (id: string) => api.get<PickTask>(`/wes/pick-tasks/${id}`),
 
-  dispatchRetrieve: (pickTaskId: string) =>
-    api.post<PickTask>(`/wes/pick-tasks/${pickTaskId}/dispatch`),
-
   scanItem: (stationId: string, pickTaskId: string) =>
     api.post<PickTask>(`/wes/stations/${stationId}/scan`, { pick_task_id: pickTaskId }),
 
@@ -103,4 +100,18 @@ export const wesApi = {
       slot_id: slotId,
       tote_barcode: toteBarcode,
     }),
+
+  clearPutwallSlot: (stationId: string, slotId: string) =>
+    api.post<PutWallSlot>(`/wes/stations/${stationId}/putwall/clear-slot`, {
+      slot_id: slotId,
+    }),
+
+  updateStationQueueConfig: (
+    stationId: string,
+    config: {
+      approach_cell?: { position: number; row: number; col: number } | null;
+      holding_cell?: { position: number; row: number; col: number } | null;
+      queue_cells?: Array<{ position: number; row: number; col: number }>;
+    },
+  ) => api.put(`/wes/stations/${stationId}/queue-config`, config),
 };

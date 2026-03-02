@@ -4,7 +4,7 @@ import type { Station } from "../types/station";
 import type { PickTask } from "../types/pickTask";
 import type { Order } from "../types/order";
 import type { Alarm } from "../types/alarm";
-import type { WSMessage, KPIPayload, SnapshotPayload, RobotUpdatedPayload } from "../types/websocket";
+import type { WSMessage, KPIPayload, SnapshotPayload, RobotUpdatedPayload, AllocationStatsPayload, ToteOriginHeatmapPayload } from "../types/websocket";
 
 type MessageHandler = (payload: unknown) => void;
 
@@ -19,7 +19,15 @@ const handlers: Record<string, MessageHandler> = {
   },
 
   "station.updated": (payload) => {
-    useWarehouseStore.getState().updateStation(payload as Station);
+    // Merge partial station updates (e.g. queue_state from simulator)
+    // with existing station data to avoid losing fields.
+    const data = payload as Partial<Station> & { id: string };
+    const existing = useWarehouseStore.getState().stations.find((s) => s.id === data.id);
+    if (existing) {
+      useWarehouseStore.getState().updateStation({ ...existing, ...data });
+    } else {
+      useWarehouseStore.getState().updateStation(data as Station);
+    }
   },
 
   "task.updated": (payload) => {
@@ -71,6 +79,18 @@ const handlers: Record<string, MessageHandler> = {
   "heatmap.updated": (payload) => {
     const { cells } = payload as { cells: Record<string, number> };
     useWarehouseStore.getState().updateHeatmap(cells);
+  },
+
+  "allocation_skew.updated": (payload) => {
+    useWarehouseStore.getState().updateAllocationStats(
+      payload as AllocationStatsPayload,
+    );
+  },
+
+  "tote_origin_heatmap.updated": (payload) => {
+    useWarehouseStore.getState().updateToteOriginHeatmap(
+      payload as ToteOriginHeatmapPayload,
+    );
   },
 
   // ----- New logic.md required events -----

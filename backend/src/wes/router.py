@@ -120,6 +120,18 @@ class ReleaseModeBody(BaseModel):
     enabled: bool
 
 
+class QueueCellIn(BaseModel):
+    position: int
+    row: int
+    col: int
+
+
+class QueueConfigBody(BaseModel):
+    approach_cell: QueueCellIn | None = None
+    holding_cell: QueueCellIn | None = None
+    queue_cells: list[QueueCellIn] = []
+
+
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
@@ -245,6 +257,62 @@ async def toggle_station_online(
     return station
 
 
+@router.put("/stations/{station_id}/queue-config")
+async def update_station_queue_config(
+    station_id: uuid.UUID,
+    body: QueueConfigBody,
+    session: SessionDep,
+):
+    """Update approach/holding/queue cell positions for a station."""
+    import json
+
+    from src.wes.domain.models import Station
+
+    station = await session.get(Station, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    if body.approach_cell:
+        station.approach_cell_row = body.approach_cell.row
+        station.approach_cell_col = body.approach_cell.col
+    else:
+        station.approach_cell_row = None
+        station.approach_cell_col = None
+
+    if body.holding_cell:
+        station.holding_cell_row = body.holding_cell.row
+        station.holding_cell_col = body.holding_cell.col
+    else:
+        station.holding_cell_row = None
+        station.holding_cell_col = None
+
+    if body.queue_cells:
+        station.queue_cells_json = json.dumps(
+            [{"position": qc.position, "row": qc.row, "col": qc.col} for qc in body.queue_cells]
+        )
+    else:
+        station.queue_cells_json = None
+
+    await session.commit()
+
+    # Broadcast updated snapshot so map refreshes
+    from src.shared.snapshot_builder import build_snapshot
+    from src.shared.websocket_manager import ws_manager
+
+    snapshot = await build_snapshot()
+    await ws_manager.broadcast("snapshot", snapshot)
+
+    return {
+        "status": "ok",
+        "station_id": str(station_id),
+        "approach_cell": {"row": station.approach_cell_row, "col": station.approach_cell_col}
+        if station.approach_cell_row is not None else None,
+        "holding_cell": {"row": station.holding_cell_row, "col": station.holding_cell_col}
+        if station.holding_cell_row is not None else None,
+        "queue_cells": json.loads(station.queue_cells_json) if station.queue_cells_json else [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pick Tasks
 # ---------------------------------------------------------------------------
@@ -271,44 +339,6 @@ async def get_pick_task(pick_task_id: uuid.UUID, session: SessionDep):
     return task
 
 
-@router.post("/pick-tasks/{pick_task_id}/dispatch", response_model=PickTaskOut)
-async def dispatch_retrieve(
-    pick_task_id: uuid.UUID,
-    session: SessionDep,
-):
-    """Manually trigger tote pull (RETRIEVE) for a pick task in SOURCE_REQUESTED state."""
-    from src.wes.domain.enums import PickTaskState
-    from src.wes.domain.models import PickTask
-    from src.ess.domain.models import Tote
-    from src.wes.domain.events import RetrieveSourceTote
-    from src.shared.event_bus import event_bus
-
-    pt = await session.get(PickTask, pick_task_id)
-    if pt is None:
-        raise HTTPException(status_code=404, detail="Pick task not found")
-    if pt.state != PickTaskState.SOURCE_REQUESTED:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Pick task must be in SOURCE_REQUESTED state (current: {pt.state.value})",
-        )
-    if pt.source_tote_id is None:
-        raise HTTPException(status_code=400, detail="No source tote assigned")
-
-    tote = await session.get(Tote, pt.source_tote_id)
-    if tote is None or tote.current_location_id is None:
-        raise HTTPException(status_code=400, detail="Source tote has no location")
-
-    await event_bus.publish(RetrieveSourceTote(
-        pick_task_id=pt.id,
-        tote_id=tote.id,
-        source_location_id=tote.current_location_id,
-        station_id=pt.station_id,
-    ))
-
-    await session.refresh(pt)
-    return pt
-
-
 @router.post("/stations/{station_id}/scan", response_model=PickTaskOut)
 async def scan_item(
     station_id: uuid.UUID,
@@ -318,6 +348,7 @@ async def scan_item(
     from src.wes.domain.models import Station
     from src.ess.domain.models import Robot
     from sqlalchemy import select
+    from src.handler_support import get_robot_position
 
     svc = PickTaskService(session)
     try:
@@ -329,20 +360,22 @@ async def scan_item(
                 detail="Pick task does not belong to this station",
             )
 
-        # CV-1: Verify a robot holding this task's tote is at the station
+        # CV-1: Verify a robot holding this task's tote is physically at the station
         station = await session.get(Station, station_id)
         robot_present = False
         if station is not None:
+            matched_robot = None
+
             # Method 1: Check station.current_robot_id
             if station.current_robot_id is not None:
                 robot = await session.get(Robot, station.current_robot_id)
                 if (robot is not None
                         and robot.hold_pick_task_id == body.pick_task_id
                         and robot.hold_at_station):
-                    robot_present = True
+                    matched_robot = robot
 
             # Method 2: Search for any robot reserved at this station with hold_at_station
-            if not robot_present:
+            if matched_robot is None:
                 result = await session.execute(
                     select(Robot).where(
                         Robot.hold_at_station == True,  # noqa: E712
@@ -350,7 +383,26 @@ async def scan_item(
                         Robot.reservation_station_id == station_id,
                     ).limit(1)
                 )
-                if result.scalar_one_or_none() is not None:
+                matched_robot = result.scalar_one_or_none()
+
+            # Physical position check: verify robot is at station or approach cell
+            if matched_robot is not None:
+                robot_pos = await get_robot_position(matched_robot.id)
+                if robot_pos is not None:
+                    valid_positions = {(station.grid_row, station.grid_col)}
+                    if station.approach_cell_row is not None:
+                        valid_positions.add((station.approach_cell_row, station.approach_cell_col))
+                    if robot_pos in valid_positions:
+                        robot_present = True
+                    else:
+                        import logging as _log
+                        _log.getLogger(__name__).warning(
+                            "Scan rejected: robot %s DB says hold_at_station=True "
+                            "but physical pos %s not in station positions %s",
+                            matched_robot.id, robot_pos, valid_positions,
+                        )
+                else:
+                    # Redis position not available — trust DB flags as fallback
                     robot_present = True
 
         if not robot_present:
@@ -367,19 +419,29 @@ async def scan_item(
     for evt in svc.collect_events():
         await event_bus.publish(evt)
 
-    # When all items picked (auto-transition to RETURN_REQUESTED), trigger
-    # the return flow so the source tote goes back to the rack.
+    # Auto-trigger source tote return when all items picked (K50H departs).
+    # Target tote "Tote Full" is a separate, independent operator action.
     if task.state == PickTaskState.RETURN_REQUESTED and task.source_tote_id:
-        from src.ess.domain.models import Tote
-        source_tote = await session.get(Tote, task.source_tote_id)
-        if source_tote is not None and source_tote.home_location_id is not None:
-            from src.wes.domain.events import ReturnSourceTote
-            await event_bus.publish(ReturnSourceTote(
-                pick_task_id=task.id,
-                tote_id=task.source_tote_id,
-                target_location_id=source_tote.home_location_id,
-                station_id=station_id,
-            ))
+        from sqlalchemy import select as sa_select
+        from src.ess.domain.models import EquipmentTask as EqTask
+        from src.ess.domain.enums import EquipmentTaskType
+        existing_return = await session.execute(
+            sa_select(EqTask).where(
+                EqTask.pick_task_id == task.id,
+                EqTask.type == EquipmentTaskType.RETURN,
+            ).limit(1)
+        )
+        if existing_return.scalar_one_or_none() is None:
+            from src.ess.domain.models import Tote as ToteModel
+            source_tote = await session.get(ToteModel, task.source_tote_id)
+            if source_tote is not None and source_tote.home_location_id is not None:
+                from src.wes.domain.events import ReturnSourceTote
+                await event_bus.publish(ReturnSourceTote(
+                    pick_task_id=task.id,
+                    tote_id=task.source_tote_id,
+                    target_location_id=source_tote.home_location_id,
+                    station_id=station_id,
+                ))
 
     return task
 
@@ -643,7 +705,7 @@ async def handle_tote_full(
     if (all_picked or already_returning) and task.source_tote_id:
         # Transition to RETURN_REQUESTED if still in PICKING
         if task.state == PickTaskState.PICKING:
-            from src.wes.domain.state_machines.pick_task_sm import pick_task_sm
+            from src.wes.domain.state_machines import pick_task_sm
             new_state, _side_effects = pick_task_sm.transition(task.state, "pick_complete")
             task.state = new_state
 
@@ -740,10 +802,9 @@ async def bind_putwall_slot(
         session.add(tote)
         await session.flush()
 
-    # Prevent same tote in multiple active slots at this station
+    # Prevent same tote in multiple active slots across ALL stations
     existing = await session.execute(
         select(PutWallSlot).where(
-            PutWallSlot.station_id == station_id,
             PutWallSlot.target_tote_id == tote.id,
             PutWallSlot.id != slot.id,
         ).limit(1)
@@ -751,11 +812,41 @@ async def bind_putwall_slot(
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=400,
-            detail="This tote is already bound to another slot at this station",
+            detail="This tote is already bound to a putwall slot at another station",
         )
 
     slot.target_tote_id = tote.id
     slot.target_tote_barcode = body.tote_barcode
+    await session.commit()
+    return slot
+
+
+class ClearSlotBody(BaseModel):
+    slot_id: uuid.UUID
+
+
+@router.post(
+    "/stations/{station_id}/putwall/clear-slot", response_model=PutWallSlotOut
+)
+async def clear_putwall_slot(
+    station_id: uuid.UUID,
+    body: ClearSlotBody,
+    session: SessionDep,
+):
+    """Clear a putwall slot's tote binding (manual tote-full for orphaned slots)."""
+    from src.wes.domain.models import PutWallSlot
+
+    slot = await session.get(PutWallSlot, body.slot_id)
+    if slot is None:
+        raise HTTPException(status_code=404, detail="Slot not found")
+    if slot.station_id != station_id:
+        raise HTTPException(
+            status_code=400, detail="Slot does not belong to this station"
+        )
+
+    slot.target_tote_id = None
+    slot.target_tote_barcode = None
+    slot.is_locked = False
     await session.commit()
     return slot
 

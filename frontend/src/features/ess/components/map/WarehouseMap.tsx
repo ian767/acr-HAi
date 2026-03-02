@@ -19,6 +19,7 @@ const CELL_COLORS: Record<string, string> = {
   AISLE: "#2d3148",
   WALL: "#111111",
   CHARGING: "#22c55e",
+  IDLE_POINT: "#f59e0b",
 };
 
 const ROBOT_COLORS: Record<string, string> = {
@@ -209,6 +210,97 @@ export function WarehouseMap() {
           ctx.fillRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
         }
       }
+
+      // ---- Tote origin heatmap overlay ----
+      const { showToteOriginHeatmap, toteHeatmapMode } = useUiStore.getState();
+      const toteOriginHeatmap = useWarehouseStore.getState().toteOriginHeatmap;
+      if (showToteOriginHeatmap && toteOriginHeatmap) {
+        const cells =
+          toteHeatmapMode === "allocated"
+            ? toteOriginHeatmap.allocated
+            : toteOriginHeatmap.completed;
+        if (cells) {
+          // Top-N rendering for performance
+          const entries = Object.entries(cells);
+          entries.sort((a, b) => b[1] - a[1]);
+          const topN = entries.slice(0, 300);
+          const maxVal = Math.max(1, topN[0]?.[1] ?? 1);
+          for (const [key, count] of topN) {
+            const parts = key.split(",");
+            const r = parseInt(parts[0] ?? "", 10);
+            const c = parseInt(parts[1] ?? "", 10);
+            if (isNaN(r) || isNaN(c)) continue;
+            const norm = count / maxVal;
+            const alpha = 0.15 + norm * 0.55;
+            ctx.fillStyle =
+              toteHeatmapMode === "allocated"
+                ? `rgba(139, 92, 246, ${alpha})`
+                : `rgba(34, 197, 94, ${alpha})`;
+            ctx.fillRect(
+              c * CELL_SIZE,
+              r * CELL_SIZE,
+              CELL_SIZE - 1,
+              CELL_SIZE - 1,
+            );
+            if (norm > 0.3) {
+              ctx.fillStyle = "rgba(255,255,255,0.8)";
+              ctx.font = "bold 7px monospace";
+              ctx.textAlign = "center";
+              ctx.fillText(
+                String(count),
+                c * CELL_SIZE + CELL_SIZE / 2,
+                r * CELL_SIZE + CELL_SIZE / 2 + 3,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Draw station queue cells (approach, queue, holding) BEFORE station body
+    for (const station of stations) {
+      // Approach cell — yellow diamond
+      if (station.approach_cell_row != null && station.approach_cell_col != null) {
+        const ax = station.approach_cell_col * CELL_SIZE + CELL_SIZE / 2;
+        const ay = station.approach_cell_row * CELL_SIZE + CELL_SIZE / 2;
+        ctx.fillStyle = "rgba(234, 179, 8, 0.35)";
+        ctx.fillRect(
+          station.approach_cell_col * CELL_SIZE,
+          station.approach_cell_row * CELL_SIZE,
+          CELL_SIZE - 1,
+          CELL_SIZE - 1,
+        );
+        ctx.strokeStyle = "#eab308";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(
+          station.approach_cell_col * CELL_SIZE + 1,
+          station.approach_cell_row * CELL_SIZE + 1,
+          CELL_SIZE - 3,
+          CELL_SIZE - 3,
+        );
+        ctx.fillStyle = "#eab308";
+        ctx.font = "bold 7px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("A", ax, ay + 3);
+      }
+
+      // Queue cells — cyan numbered
+      if (station.queue_cells && station.queue_cells.length > 0) {
+        for (const qc of station.queue_cells) {
+          const qx = qc.col * CELL_SIZE + CELL_SIZE / 2;
+          const qy = qc.row * CELL_SIZE + CELL_SIZE / 2;
+          ctx.fillStyle = "rgba(6, 182, 212, 0.3)";
+          ctx.fillRect(qc.col * CELL_SIZE, qc.row * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
+          ctx.strokeStyle = "#06b6d4";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(qc.col * CELL_SIZE + 1, qc.row * CELL_SIZE + 1, CELL_SIZE - 3, CELL_SIZE - 3);
+          ctx.fillStyle = "#06b6d4";
+          ctx.font = "bold 7px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(`Q${qc.position + 1}`, qx, qy + 3);
+        }
+      }
+
     }
 
     // Draw stations
@@ -225,6 +317,99 @@ export function WarehouseMap() {
       ctx.font = "9px monospace";
       ctx.textAlign = "center";
       ctx.fillText(station.name, x, y + 16);
+    }
+
+    // ---- Draw pending queue cells from editor (unsaved) ----
+    const pendingQueueCells = (useUiStore.getState() as any)?._pendingQueueCells;
+    if (pendingQueueCells && Array.isArray(pendingQueueCells)) {
+      for (let i = 0; i < pendingQueueCells.length; i++) {
+        const cell = pendingQueueCells[i];
+        const cx = cell.col * CELL_SIZE + CELL_SIZE / 2;
+        const cy = cell.row * CELL_SIZE + CELL_SIZE / 2;
+        const isApproach = i === 0;
+        const isHolding = i === pendingQueueCells.length - 1 && pendingQueueCells.length > 1;
+        const color = isApproach ? "#eab308" : isHolding ? "#f97316" : "#06b6d4";
+
+        // Pulsing border
+        const pulse = (Math.sin(now / 400 + i) + 1) / 2;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5 + pulse;
+        ctx.strokeRect(
+          cell.col * CELL_SIZE + 1,
+          cell.row * CELL_SIZE + 1,
+          CELL_SIZE - 3,
+          CELL_SIZE - 3,
+        );
+        ctx.fillStyle = color;
+        ctx.font = "bold 8px monospace";
+        ctx.textAlign = "center";
+        const label = isApproach ? "A" : isHolding ? "H" : `Q${i}`;
+        ctx.fillText(label, cx, cy + 3);
+      }
+    }
+
+    // ---- Draw territory overlays (saved + pending edit) ----
+    if (gridState) {
+      // Draw saved territories from robot data (always visible)
+      for (const [, robot] of Object.entries(robots)) {
+        if (
+          inferType(robot) === "A42TD" &&
+          robot.territory_col_min != null &&
+          robot.territory_col_max != null
+        ) {
+          const cMin = robot.territory_col_min;
+          const cMax = robot.territory_col_max;
+          const rMin = robot.territory_row_min ?? 0;
+          const rMax = robot.territory_row_max ?? gridState.rows - 1;
+          ctx.fillStyle = "rgba(59, 130, 246, 0.08)";
+          ctx.fillRect(
+            cMin * CELL_SIZE,
+            rMin * CELL_SIZE,
+            (cMax - cMin + 1) * CELL_SIZE,
+            (rMax - rMin + 1) * CELL_SIZE,
+          );
+          ctx.strokeStyle = "rgba(59, 130, 246, 0.25)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.strokeRect(
+            cMin * CELL_SIZE,
+            rMin * CELL_SIZE,
+            (cMax - cMin + 1) * CELL_SIZE,
+            (rMax - rMin + 1) * CELL_SIZE,
+          );
+          ctx.setLineDash([]);
+        }
+      }
+
+      // Draw pending territory edit overlay (brighter, pulsing rectangle)
+      const uiState = useUiStore.getState() as any;
+      const editColMin = uiState?._territoryColMin;
+      const editColMax = uiState?._territoryColMax;
+      const editRowMin = uiState?._territoryRowMin;
+      const editRowMax = uiState?._territoryRowMax;
+      const editRobotId = uiState?._territoryRobotId;
+      if (editColMin != null && editColMax != null && editRobotId) {
+        const cMin = Math.min(editColMin, editColMax);
+        const cMax = Math.max(editColMin, editColMax);
+        const rMin = editRowMin != null && editRowMax != null ? Math.min(editRowMin, editRowMax) : 0;
+        const rMax = editRowMin != null && editRowMax != null ? Math.max(editRowMin, editRowMax) : gridState.rows - 1;
+        const pulse = (Math.sin(now / 400) + 1) / 2;
+        ctx.fillStyle = `rgba(168, 85, 247, ${0.1 + pulse * 0.1})`;
+        ctx.fillRect(
+          cMin * CELL_SIZE,
+          rMin * CELL_SIZE,
+          (cMax - cMin + 1) * CELL_SIZE,
+          (rMax - rMin + 1) * CELL_SIZE,
+        );
+        ctx.strokeStyle = `rgba(168, 85, 247, ${0.4 + pulse * 0.3})`;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(
+          cMin * CELL_SIZE,
+          rMin * CELL_SIZE,
+          (cMax - cMin + 1) * CELL_SIZE,
+          (rMax - rMin + 1) * CELL_SIZE,
+        );
+      }
     }
 
     // ---- Draw paths (before robots so they appear behind) ----
@@ -284,6 +469,15 @@ export function WarehouseMap() {
       ctx.arc(x, y, 7, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
+
+      // Tote indicator — small orange box on robot when carrying a tote
+      if (robot.hold_pick_task_id) {
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(x - 4, y - 4, 8, 8);
+        ctx.strokeStyle = "rgba(0,0,0,0.5)";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(x - 4, y - 4, 8, 8);
+      }
 
       // Selection ring
       if (isSelected) {
@@ -378,6 +572,55 @@ export function WarehouseMap() {
     const { editorMode: isEditing, editorTool } = useUiStore.getState();
 
     if (isEditing && e.button === 0) {
+      // Queue tool: single click adds cell to queue config
+      if (editorTool === "QUEUE") {
+        const cell = screenToGrid(e.clientX, e.clientY);
+        if (cell && cell.row >= 0 && cell.col >= 0) {
+          const queueClick = (useUiStore.getState() as any)._queueCellClick;
+          if (typeof queueClick === "function") {
+            queueClick(cell.row, cell.col);
+          }
+        }
+        return;
+      }
+
+      // Territory tool: single click sets column range
+      if (editorTool === "TERRITORY") {
+        const cell = screenToGrid(e.clientX, e.clientY);
+        if (cell && cell.row >= 0 && cell.col >= 0) {
+          const territoryCellClick = (useUiStore.getState() as any)._territoryCellClick;
+          if (typeof territoryCellClick === "function") {
+            territoryCellClick(cell.row, cell.col);
+          }
+        }
+        return;
+      }
+
+      // Robot tool: single click places or removes a robot
+      if (editorTool.startsWith("ROBOT_")) {
+        const cell = screenToGrid(e.clientX, e.clientY);
+        if (cell && cell.row >= 0 && cell.col >= 0) {
+          const robots = useWarehouseStore.getState().robots;
+          let deleted = false;
+          for (const [id, robot] of Object.entries(robots)) {
+            if (robot.row === cell.row && robot.col === cell.col) {
+              essApi.deleteRobot(id).catch((err) =>
+                alert("Failed to delete robot: " + String(err)),
+              );
+              deleted = true;
+              break;
+            }
+          }
+          if (!deleted) {
+            const robotType = editorTool === "ROBOT_K50H" ? "K50H" : "A42TD";
+            essApi.createRobot({ type: robotType, row: cell.row, col: cell.col }).catch(
+              (err) => alert("Failed to create robot: " + String(err)),
+            );
+          }
+        }
+        return;
+      }
+
       // Editor mode: left click starts painting
       paintingRef.current = true;
       lastPaintedRef.current = null;
@@ -453,7 +696,7 @@ export function WarehouseMap() {
 
     const { robots } = useWarehouseStore.getState();
     let closestId: string | null = null;
-    let closestDist = 10 / zoom; // 10px in screen space
+    let closestDist = 20 / zoom; // 20px in screen space (full cell)
 
     for (const [id, robot] of Object.entries(robots)) {
       const rx = robot.col * CELL_SIZE + CELL_SIZE / 2;

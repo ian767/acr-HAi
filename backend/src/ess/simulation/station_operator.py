@@ -92,11 +92,31 @@ class StationOperator:
                                 task.id, updated_task.qty_picked, updated_task.qty_to_pick,
                             )
 
-                            # Return flow is triggered automatically:
-                            # scan_item() → RETURN_REQUESTED state change →
-                            # PickTaskStateChanged event → pick_task_handlers
-                            # publishes ReturnSourceTote.  No explicit publish
-                            # needed here (doing so would create duplicates).
+                            # Auto-trigger source tote return when all items picked.
+                            if (
+                                updated_task.state == PickTaskState.RETURN_REQUESTED
+                                and updated_task.source_tote_id
+                            ):
+                                from sqlalchemy import select as _sel
+                                from src.ess.domain.models import EquipmentTask as _ET
+                                from src.ess.domain.enums import EquipmentTaskType as _ETT
+                                existing = await session.execute(
+                                    _sel(_ET).where(
+                                        _ET.pick_task_id == updated_task.id,
+                                        _ET.type == _ETT.RETURN,
+                                    ).limit(1)
+                                )
+                                if existing.scalar_one_or_none() is None:
+                                    from src.ess.domain.models import Tote as _Tote
+                                    src_tote = await session.get(_Tote, updated_task.source_tote_id)
+                                    if src_tote and src_tote.home_location_id:
+                                        from src.wes.domain.events import ReturnSourceTote
+                                        pending_events.append(ReturnSourceTote(
+                                            pick_task_id=updated_task.id,
+                                            tote_id=updated_task.source_tote_id,
+                                            target_location_id=src_tote.home_location_id,
+                                            station_id=updated_task.station_id,
+                                        ))
                         except Exception:
                             logger.exception(
                                 "Station operator failed to scan PickTask %s",

@@ -114,7 +114,10 @@ class PickTaskService:
 
     async def scan_item(self, pick_task_id: uuid.UUID) -> PickTask:
         """Increment qty_picked.  Auto-transitions to RETURN_REQUESTED
-        when all items have been picked.
+        when all items have been picked (triggers source tote return).
+
+        Target-tote "Tote Full" is a separate operator action and does
+        NOT block the source tote return flow.
         """
         task = await self.get_pick_task(pick_task_id)
 
@@ -131,7 +134,7 @@ class PickTaskService:
         task.qty_picked += 1
         await self._repo.update(task)
 
-        # Auto-complete when all items picked
+        # Auto-complete when all items picked → K50H returns source tote
         if task.qty_picked >= task.qty_to_pick:
             task = await self.transition_state(pick_task_id, "pick_complete")
 

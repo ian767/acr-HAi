@@ -32,3 +32,9 @@ async def acknowledge_alarm(alarm_id: str):
 async def get_metrics():
     snapshot = metrics_service.get_snapshot()
     return asdict(snapshot)
+
+
+@router.get("/allocation-stats")
+async def get_allocation_stats_endpoint():
+    from src.wes.application.allocation_engine import get_allocation_stats
+    return get_allocation_stats()

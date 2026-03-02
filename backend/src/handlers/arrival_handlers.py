@@ -78,6 +78,12 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
         )
         return
 
+    # Guard: don't reassign a robot that is in a station queue
+    from src.wes.application.station_queue_service import is_robot_in_any_queue
+    if robot is not None and is_robot_in_any_queue(robot_id):
+        logger.info("Retry skipped: robot %s is in a station queue", robot_id)
+        return
+
     # Try priority query first, then fallback.
     result = await session.execute(stmt_priority)
     eq_task = result.scalar_one_or_none()
@@ -164,11 +170,30 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
         already_at_target = False
         planned = None
         if eq_task.type == EquipmentTaskType.RETRIEVE and eq_task.source_location_id:
-            # A42TD → rack-edge near SOURCE column, avoiding cells
-            # already targeted by other active A42TDs.
+            # A42TD two-leg path: start → source rack → cantilever.
+            # Leg 1: move to the FLOOR cell adjacent to the source rack
+            # Leg 2: carry tote from rack to cantilever (rack-edge row)
             loc = await session.get(Location, eq_task.source_location_id)
             ref_row = loc.grid_row if loc else start[0]
             ref_col = loc.grid_col if loc else start[1]
+
+            # Find the source rack-adjacent cell (nearest walkable to rack)
+            from src.ess.application.path_planner import PathPlanner as _PP_a42
+            _a42_tcols = None
+            _a42_trows = None
+            if getattr(robot, "territory_col_min", None) is not None:
+                _a42_tcols = (robot.territory_col_min, robot.territory_col_max)
+            if getattr(robot, "territory_row_min", None) is not None:
+                _a42_trows = (robot.territory_row_min, robot.territory_row_max)
+            _planner_a42 = _PP_a42(
+                simulation_state.grid or [], aisle_rows=simulation_state.aisle_rows,
+                territory_cols=_a42_tcols, territory_rows=_a42_trows,
+            )
+            source_cell = _planner_a42._nearest_walkable((ref_row, ref_col))
+            if source_cell is None:
+                source_cell = (ref_row, ref_col)
+
+            # Cantilever target: rack-edge near source column
             from sqlalchemy import select as _sel2
             _active2 = await session.execute(
                 _sel2(EquipmentTask).where(
@@ -194,14 +219,35 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
             if rack_edge is None:
                 rack_edge = find_nearest_rack_edge(simulation_state.grid, ref_row, ref_col)
             if rack_edge:
-                planned = await plan_and_store_path(svc, robot.id, start, rack_edge)
-                if not planned and start == rack_edge:
+                # Plan two-segment path: start → source rack → cantilever
+                seg1 = _planner_a42.find_path(start, source_cell)
+                seg2 = _planner_a42.find_path(source_cell, rack_edge)
+                if seg1 and seg2:
+                    combined = seg1[1:] + seg2[1:]
+                    from src.ess.infrastructure.redis_cache import RobotStateCache as _RSC_a42
+                    from src.shared.redis import get_redis as _gr_a42
+                    _r_a42 = await _gr_a42()
+                    _c_a42 = _RSC_a42(_r_a42)
+                    await _c_a42.set_path(robot.id, combined)
+                    planned = combined
+                    logger.info(
+                        "A42TD %s: %s → source %s → cantilever %s (%d steps)",
+                        robot.id, start, source_cell, rack_edge, len(combined),
+                    )
+                elif start == rack_edge or start == source_cell:
                     already_at_target = True
-                elif not planned:
-                    # Path planning failed — release robot, keep task PENDING
+                else:
+                    # Fallback: direct path to cantilever (with territory)
+                    from src.ess.domain.enums import RobotType as _RT_a42fb
+                    planned = await plan_and_store_path(
+                        svc, robot.id, start, rack_edge,
+                        robot_type=_RT_a42fb(robot_type_str),
+                        territory_cols=_a42_tcols, territory_rows=_a42_trows,
+                    )
+                if not planned and not already_at_target:
                     logger.warning(
-                        "Retry: path planning failed %s -> %s, releasing %s %s",
-                        start, rack_edge, robot_type_str, robot_id,
+                        "Retry: path planning failed %s -> %s -> %s, releasing %s %s",
+                        start, source_cell, rack_edge, robot_type_str, robot_id,
                     )
                     await svc.fm.release_robot(robot_id, eq_task.id)
                     if robot_type_str == "A42TD":
@@ -264,7 +310,8 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
     elif eq_task.state == EquipmentTaskState.AT_CANTILEVER:
         # Second leg dispatch
         if eq_task.type == EquipmentTaskType.RETRIEVE:
-            # K50H → station (set reservation + tote possession first)
+            # K50H → station (set reservation; tote possession deferred
+            # until K50H physically reaches the cantilever/rack-edge row)
             from src.wes.application.reservation_service import ReservationService
             pick_task = await session.get(PickTask, eq_task.pick_task_id)
             if pick_task:
@@ -275,14 +322,60 @@ async def _retry_pending_tasks(session, robot_id, robot_type_str: str) -> None:
                     pick_task_id=eq_task.pick_task_id,
                     station_id=pick_task.station_id,
                 )
-                await rsvc.set_tote_possession(
-                    robot_id,
-                    pick_task_id=eq_task.pick_task_id,
-                    at_station=False,
-                )
                 station = await session.get(Station, pick_task.station_id)
                 if station:
-                    await plan_and_store_path(svc, robot.id, start, (station.grid_row, station.grid_col))
+                    # Direct queue slot routing: find next free slot
+                    from src.wes.application.station_queue_service import StationQueueService as _QSvc
+                    _qsvc = _QSvc(session)
+                    _slot_name, _slot_idx, _slot_cell = await _qsvc.find_next_slot(station.id)
+                    if _slot_cell is not None:
+                        station_pos = _slot_cell
+                        # Pre-register in queue so next dispatch sees it
+                        await _qsvc.place_in_slot(station.id, robot_id, _slot_name, _slot_idx)
+                        logger.info(
+                            "K50H %s: station %s → slot %s[%s] at %s",
+                            robot.id, station.name, _slot_name, _slot_idx, station_pos,
+                        )
+                    else:
+                        # Queue full — still register via enter_queue (goes to
+                        # holding) so the robot is tracked and queue advance
+                        # will eventually reroute it.
+                        await _qsvc.enter_queue(station.id, robot_id)
+                        target = await _qsvc.get_robot_target_cell(station.id, robot_id)
+                        if target is not None:
+                            station_pos = target
+                        elif station.approach_cell_row is not None:
+                            station_pos = (station.approach_cell_row, station.approach_cell_col)
+                        else:
+                            station_pos = (station.grid_row, station.grid_col)
+                        logger.warning(
+                            "K50H %s: station %s queue full, registered in overflow → %s",
+                            robot.id, station.name, station_pos,
+                        )
+                    # Route K50H through cantilever first (tote handoff point)
+                    from src.ess.domain.models import Location as _RetryLoc
+                    src_loc = await session.get(_RetryLoc, eq_task.source_location_id) if eq_task.source_location_id else None
+                    ref_col = src_loc.grid_col if src_loc else start[1]
+                    cant = find_nearest_rack_edge(
+                        simulation_state.grid, start[0], ref_col,
+                    )
+                    if cant and cant != start:
+                        from src.ess.application.path_planner import PathPlanner as _PP2
+                        from src.ess.domain.enums import RobotType as _RT2
+                        _planner = _PP2(simulation_state.grid, robot_type=_RT2.K50H, aisle_rows=simulation_state.aisle_rows)
+                        _s1 = _planner.find_path(start, cant)
+                        _s2 = _planner.find_path(cant, station_pos)
+                        if _s1 and _s2:
+                            combined = _s1[1:] + _s2[1:]
+                            from src.ess.infrastructure.redis_cache import RobotStateCache as _RSC2
+                            from src.shared.redis import get_redis as _gr2
+                            _r2 = await _gr2()
+                            _c2 = _RSC2(_r2)
+                            await _c2.set_path(robot.id, combined)
+                        else:
+                            await plan_and_store_path(svc, robot.id, start, station_pos, robot_type=_RT2.K50H, avoid_queue=False)
+                    else:
+                        await plan_and_store_path(svc, robot.id, start, station_pos, robot_type=_RT2.K50H, avoid_queue=False)
         elif eq_task.type == EquipmentTaskType.RETURN:
             # RETURN A42TD: complete immediately (no physical movement).
             # The cantilever is the handoff point — A42TD doesn't need to move.
@@ -397,12 +490,14 @@ async def _handle_source_at_cantilever(event) -> None:
                 source_loc = await session.get(Location, eq_task.source_location_id) if eq_task.source_location_id else None
                 zone_id = source_loc.zone_id if source_loc else None
                 if zone_id is not None:
-                    edge_row = simulation_state.rack_edge_row or (source_loc.grid_row if source_loc else 0)
+                    # Search for K50H near the source tote's position
+                    # (per-aisle handoff — tote is at the A42TD's aisle).
                     k50h = await svc.fm.find_nearest_idle(
                         zone_id=zone_id,
                         robot_type=RobotType.K50H,
-                        target_row=edge_row,
+                        target_row=source_loc.grid_row if source_loc else 0,
                         target_col=source_loc.grid_col if source_loc else 0,
+                        aisle_rows=simulation_state.aisle_rows,
                     )
 
                     # Recovery: if no idle K50H, force-release stuck ones at stations
@@ -438,7 +533,8 @@ async def _handle_source_at_cantilever(event) -> None:
                         eq_task.k50h_robot_id = k50h.id
                         await session.flush()
 
-            # Set tote possession + reservation on K50H (picking up tote at cantilever)
+            # Set reservation on K50H (tote possession deferred until
+            # K50H physically reaches the cantilever/rack-edge row).
             if eq_task.k50h_robot_id is not None:
                 rsvc = ReservationService(session)
                 pick_task = await session.get(PickTask, eq_task.pick_task_id)
@@ -449,11 +545,6 @@ async def _handle_source_at_cantilever(event) -> None:
                         pick_task_id=eq_task.pick_task_id,
                         station_id=pick_task.station_id,
                     )
-                await rsvc.set_tote_possession(
-                    eq_task.k50h_robot_id,
-                    pick_task_id=eq_task.pick_task_id,
-                    at_station=False,
-                )
 
             if eq_task.k50h_robot_id is not None and simulation_state.grid:
                 robot = await svc.fm.get_robot(eq_task.k50h_robot_id)
@@ -464,11 +555,57 @@ async def _handle_source_at_cantilever(event) -> None:
                 if pick_task is not None:
                     station = await session.get(Station, pick_task.station_id)
                     if station is not None:
-                        await plan_and_store_path(
-                            svc, robot.id,
-                            start,
-                            (station.grid_row, station.grid_col),
+                        # Pull-based FIFO: always enter through Qn (last/farthest Q cell)
+                        from src.wes.application.station_queue_service import StationQueueService as _QSvc
+                        import src.shared.simulation_state as _ss_dispatch
+                        _qsvc = _QSvc(session)
+                        _qs = _qsvc._get_queue_state(station)
+
+                        # ALWAYS add to pending queue — FIFO pull admission
+                        # is the SINGLE entry point to the queue chain.
+                        # This eliminates race conditions where two dispatch
+                        # paths both target the same Qn cell.
+                        _pending = _ss_dispatch.queue_pending.setdefault(str(station.id), [])
+                        _rid_str = str(eq_task.k50h_robot_id)
+                        if _rid_str not in _pending:
+                            _pending.append(_rid_str)
+                        logger.info(
+                            "K50H %s: station %s → pending queue (pos %d, FIFO admission)",
+                            robot.id, station.name, len(_pending),
                         )
+
+                        # Route K50H to the rack-adjacent aisle cell where
+                        # the A42TD delivered the tote (per-aisle handoff).
+                        # Use the source tote's position to find the
+                        # nearest rack-adjacent FLOOR cell.
+                        from src.ess.domain.models import Location as _Loc
+                        from src.ess.domain.enums import RobotType as _RType
+                        src_loc = await session.get(_Loc, eq_task.source_location_id) if eq_task.source_location_id else None
+                        ref_row = src_loc.grid_row if src_loc else start[0]
+                        ref_col = src_loc.grid_col if src_loc else start[1]
+                        cantilever = find_nearest_rack_edge(
+                            simulation_state.grid, ref_row, ref_col,
+                        )
+
+                        if cantilever and cantilever != start:
+                            from src.ess.application.path_planner import PathPlanner as _PP
+                            _avoid = _ss_dispatch.queue_area_cells or None
+                            planner = _PP(
+                                simulation_state.grid, robot_type=_RType.K50H,
+                                aisle_rows=simulation_state.aisle_rows,
+                                avoid_cells=_avoid,
+                            )
+                            path = planner.find_path(start, cantilever)
+                            if path and len(path) > 1:
+                                from src.ess.infrastructure.redis_cache import RobotStateCache as _RSC
+                                from src.shared.redis import get_redis as _get_redis
+                                _redis = await _get_redis()
+                                _cache = _RSC(_redis)
+                                await _cache.set_path(robot.id, path[1:])
+                                logger.info(
+                                    "K50H %s routed to cantilever %s (%d steps)",
+                                    robot.id, cantilever, len(path) - 1,
+                                )
 
                 await svc.executor.advance_task(eq_task.id, "k50h_dispatched")
 
@@ -581,16 +718,18 @@ async def _handle_source_at_station(event) -> None:
                     at_station=True,
                 )
 
-                # Enter station queue and directly set current_robot_id
-                # (StationQueueService.enter_queue only places in "holding"
-                #  but doesn't advance, so we set current_robot_id explicitly.)
+                # Register robot at approach and promote to serving (station slot).
+                # Do NOT call advance_queue() — its compact logic would shift
+                # Q slot assignments without physical movement, breaking FIFO pull.
                 from src.wes.domain.models import Station
                 qsvc = StationQueueService(session)
-                await qsvc.enter_queue(event.station_id, eq_task.k50h_robot_id)
-
                 station = await session.get(Station, event.station_id)
                 if station is not None:
+                    queue_state = qsvc._get_queue_state(station)
+                    queue_state["approach"] = str(eq_task.k50h_robot_id)
+                    queue_state["station"] = str(eq_task.k50h_robot_id)
                     station.current_robot_id = eq_task.k50h_robot_id
+                    qsvc._save_queue_state(station, queue_state, reason="source_at_station")
                     await session.flush()
 
                 # Do NOT release K50H or retry pending - it stays at station
@@ -699,6 +838,7 @@ async def _handle_return_at_cantilever(event) -> None:
                         robot_type=RobotType.A42TD,
                         target_row=edge_row,
                         target_col=target_loc.grid_col,
+                        aisle_rows=simulation_state.aisle_rows,
                     )
                     if a42td is not None:
                         await svc.fm.assign_robot(a42td.id, eq_task.id)
@@ -808,13 +948,14 @@ async def _handle_source_back_in_rack(event) -> None:
 
         pick_task = await session.get(PickTask, event.pick_task_id)
         if pick_task is not None:
-            # Auto-clear the put-wall slot on completion
+            # Unlink the pick task from the putwall slot and unlock it,
+            # but KEEP the tote binding (target_tote_id / barcode).
+            # The operator can still manually "Tote Full" to clear it,
+            # or re-use the slot for the next pick task.
             if pick_task.put_wall_slot_id:
                 from src.wes.domain.models import PutWallSlot
                 slot = await session.get(PutWallSlot, pick_task.put_wall_slot_id)
                 if slot is not None:
-                    slot.target_tote_id = None
-                    slot.target_tote_barcode = None
                     slot.is_locked = False
                 pick_task.put_wall_slot_id = None
 

@@ -32,14 +32,23 @@ async def handler_session() -> AsyncIterator[AsyncSession]:
 class HandlerServices:
     """Convenience wrapper: creates FleetManager + PathPlanner + TaskExecutor."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        robot_type: "RobotType | None" = None,
+    ) -> None:
         from src.ess.application.fleet_manager import FleetManager
         from src.ess.application.path_planner import PathPlanner
         from src.ess.application.task_executor import TaskExecutor
+        from src.ess.domain.enums import RobotType as _RT
         import src.shared.simulation_state as simulation_state
 
         self.fm = FleetManager(session)
-        self.planner = PathPlanner(simulation_state.grid or [])
+        self.planner = PathPlanner(
+            simulation_state.grid or [],
+            robot_type=robot_type,
+            aisle_rows=simulation_state.aisle_rows,
+        )
         self.traffic = simulation_state.traffic
         self.executor = TaskExecutor(session, self.fm, self.planner, self.traffic)
 
@@ -49,19 +58,28 @@ class HandlerServices:
 # ---------------------------------------------------------------------------
 
 async def get_robot_position(robot_id: Any) -> tuple[int, int] | None:
-    """Read current robot position from Redis (simulation state).
+    """Read current robot position from the in-memory simulation state.
 
-    Falls back to None if not cached yet.
+    Primary source: ``simulation_state.robot_positions`` (updated every tick
+    by RobotSimulator — always accurate).
+
+    Falls back to Redis if simulation state is empty (pre-first-tick).
+    Returns ``None`` if nothing is available yet.
     """
+    import src.shared.simulation_state as _sim
+    rid = str(robot_id)
+    live = _sim.robot_positions.get(rid)
+    if live:
+        return (live["row"], live["col"])
+
+    # Fallback: Redis (but only if row/col fields actually exist).
     from src.ess.infrastructure.redis_cache import RobotStateCache
     from src.shared.redis import get_redis
 
     redis_client = await get_redis()
     cache = RobotStateCache(redis_client)
-    state = await cache.get_state(robot_id)
-    if state and ("row" in state or "col" in state):
-        return (state["row"], state["col"])
-    return None
+    pos = await cache.get_position_safe(robot_id)
+    return pos
 
 
 async def plan_and_store_path(
@@ -69,9 +87,38 @@ async def plan_and_store_path(
     robot_id: Any,
     start: tuple[int, int],
     end: tuple[int, int],
+    robot_type: "RobotType | None" = None,
+    territory_cols: "tuple[int, int] | None" = None,
+    territory_rows: "tuple[int, int] | None" = None,
+    avoid_queue: bool = True,
 ) -> list[tuple[int, int]] | None:
-    """Compute A* path and store in Redis. Returns the path (excluding start) or None."""
-    path = services.planner.find_path(start, end)
+    """Compute A* path and store in Redis. Returns the path (excluding start) or None.
+
+    If *robot_type* is provided and differs from the services planner's type,
+    a one-off planner is used for this path computation.
+
+    When *avoid_queue* is True (default), the planner adds a cost penalty to
+    queue area cells so robots route around them instead of through them.
+    """
+    import src.shared.simulation_state as simulation_state
+    _avoid = simulation_state.queue_area_cells if avoid_queue else None
+    planner = services.planner
+    if robot_type is not None and (robot_type != planner._robot_type or territory_cols or territory_rows or _avoid):
+        from src.ess.application.path_planner import PathPlanner
+        planner = PathPlanner(
+            simulation_state.grid or [], robot_type=robot_type,
+            aisle_rows=simulation_state.aisle_rows,
+            territory_cols=territory_cols, territory_rows=territory_rows,
+            avoid_cells=_avoid,
+        )
+    elif _avoid:
+        from src.ess.application.path_planner import PathPlanner
+        planner = PathPlanner(
+            simulation_state.grid or [], robot_type=planner._robot_type,
+            aisle_rows=simulation_state.aisle_rows,
+            avoid_cells=_avoid,
+        )
+    path = planner.find_path(start, end)
     if path:
         from src.ess.infrastructure.redis_cache import RobotStateCache
         from src.shared.redis import get_redis
@@ -88,12 +135,18 @@ def find_nearest_rack_edge(
     from_row: int,
     from_col: int,
     avoid_cells: set[tuple[int, int]] | None = None,
+    territory_rows: tuple[int, int] | None = None,
 ) -> tuple[int, int] | None:
-    """Return the nearest FLOOR cell on the rack-edge row (cantilever aisle).
+    """Return the nearest FLOOR cell adjacent to RACK (cantilever handoff).
 
-    Uses ``simulation_state.rack_edge_row`` to identify the aisle row that
-    serves as the cantilever handoff point.  Falls back to the FLOOR cell
-    adjacent to the bottom-most RACK row.
+    When *territory_rows* is provided (A42TD per-aisle mode), searches
+    only within those rows for a rack-adjacent FLOOR cell.  This lets each
+    A42TD hand off totes on its own aisle row instead of routing to the
+    global ``rack_edge_row``.
+
+    Without *territory_rows*, uses ``simulation_state.rack_edge_row`` (the
+    global cantilever row) and falls back to any FLOOR cell adjacent to
+    the bottom-most RACK row.
 
     If *avoid_cells* is provided, those cells are skipped.  This lets callers
     distribute multiple robots across different rack-edge positions.
@@ -103,47 +156,59 @@ def find_nearest_rack_edge(
     from src.ess.domain.enums import CellType
     import src.shared.simulation_state as simulation_state
 
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
     best: tuple[int, int] | None = None
     best_dist = float("inf")
 
+    def _check_cell(r: int, c: int) -> bool:
+        nonlocal best, best_dist
+        if r < 0 or r >= rows or c < 0 or c >= cols:
+            return False
+        if grid[r][c] != CellType.FLOOR:
+            return False
+        has_rack = False
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                if grid[nr][nc] == CellType.RACK:
+                    has_rack = True
+                    break
+        if not has_rack:
+            return False
+        if avoid_cells and (r, c) in avoid_cells:
+            return False
+        dist = abs(r - from_row) + abs(c - from_col)
+        if dist < best_dist:
+            best_dist = dist
+            best = (r, c)
+            return True
+        return False
+
+    # --- Per-aisle mode (A42TD with territory) ---
+    if territory_rows is not None:
+        for r in range(territory_rows[0], territory_rows[1] + 1):
+            for c in range(cols):
+                _check_cell(r, c)
+        if best is not None:
+            return best
+        # Fallback: search ±1 row from territory (adjacent aisle)
+        for r in [territory_rows[0] - 1, territory_rows[1] + 1]:
+            for c in range(cols):
+                _check_cell(r, c)
+        return best
+
+    # --- Global rack_edge_row mode (K50H / default) ---
     if simulation_state.rack_edge_row is not None:
         edge_row = simulation_state.rack_edge_row
-        rows = len(grid)
-        cols = len(grid[0])
         for c in range(cols):
-            if edge_row < rows and grid[edge_row][c] == CellType.FLOOR:
-                # Only consider cells adjacent to at least one RACK cell,
-                # otherwise _emit_arrival_event won't recognise the arrival.
-                has_rack_neighbour = False
-                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nr, nc = edge_row + dr, c + dc
-                    if 0 <= nr < rows and 0 <= nc < cols:
-                        if grid[nr][nc] == CellType.RACK:
-                            has_rack_neighbour = True
-                            break
-                if not has_rack_neighbour:
-                    continue
-                if avoid_cells and (edge_row, c) in avoid_cells:
-                    continue
-                dist = abs(edge_row - from_row) + abs(c - from_col)
-                if dist < best_dist:
-                    best_dist = dist
-                    best = (edge_row, c)
+            _check_cell(edge_row, c)
 
     # Fallback: FLOOR cell adjacent to bottom-most RACK row.
     if best is None:
-        for r in range(len(grid) - 1, -1, -1):
-            for c in range(len(grid[0])):
-                if grid[r][c] == CellType.FLOOR:
-                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        nr, nc = r + dr, c + dc
-                        if 0 <= nr < len(grid) and 0 <= nc < len(grid[0]):
-                            if grid[nr][nc] == CellType.RACK:
-                                dist = abs(r - from_row) + abs(c - from_col)
-                                if dist < best_dist:
-                                    best_dist = dist
-                                    best = (r, c)
-                                break
+        for r in range(rows - 1, -1, -1):
+            for c in range(cols):
+                _check_cell(r, c)
             if best is not None:
                 break
 

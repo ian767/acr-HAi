@@ -31,16 +31,28 @@ async def build_snapshot() -> dict[str, Any]:
         redis_client = await get_redis()
         cache = RobotStateCache(redis_client)
         robots: dict[str, Any] = {}
+
+        # Use in-memory positions from the running simulator (source of truth)
+        # instead of DB values which may be stale defaults (0,0).
+        import src.shared.simulation_state as _sim_state
+        live_positions = _sim_state.robot_positions
+
         for r in robots_raw:
             path = await cache.get_path(r.id)
+            rid = str(r.id)
+            live = live_positions.get(rid)
+            # If no live data AND DB position is the default (0,0), skip this
+            # robot from the snapshot to prevent phantom (0,0) markers.
+            if not live and r.grid_row == 0 and r.grid_col == 0:
+                continue
             robot_data: dict[str, Any] = {
-                "id": str(r.id),
+                "id": rid,
                 "name": r.name,
                 "type": r.type.value,
-                "row": r.grid_row,
-                "col": r.grid_col,
-                "heading": r.heading,
-                "status": r.status.value,
+                "row": live["row"] if live else r.grid_row,
+                "col": live["col"] if live else r.grid_col,
+                "heading": live.get("heading", r.heading) if live else r.heading,
+                "status": live.get("status", r.status.value) if live else r.status.value,
                 "path": [[row, col] for row, col in path] if path else [],
             }
             # Include reservation/tote fields
@@ -54,6 +66,16 @@ async def build_snapshot() -> dict[str, Any]:
             if r.hold_pick_task_id:
                 robot_data["hold_pick_task_id"] = str(r.hold_pick_task_id)
                 robot_data["hold_at_station"] = r.hold_at_station
+            if r.territory_col_min is not None:
+                robot_data["territory_col_min"] = r.territory_col_min
+                robot_data["territory_col_max"] = r.territory_col_max
+                robot_data["territory_row_min"] = r.territory_row_min
+                robot_data["territory_row_max"] = r.territory_row_max
+            # Target debug fields (cached from _advance_all_queues)
+            if live and live.get("target_row") is not None:
+                robot_data["target_row"] = live["target_row"]
+                robot_data["target_col"] = live["target_col"]
+                robot_data["target_station"] = live.get("target_station")
 
             robots[str(r.id)] = robot_data
 
@@ -82,6 +104,11 @@ async def build_snapshot() -> dict[str, Any]:
             if s.queue_cells_json:
                 try:
                     station_data["queue_cells"] = json.loads(s.queue_cells_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if s.queue_state_json:
+                try:
+                    station_data["queue_state"] = json.loads(s.queue_state_json)
                 except (json.JSONDecodeError, TypeError):
                     pass
             stations.append(station_data)

@@ -13,7 +13,9 @@ export type WSMessageType =
   | "alarm.raised"
   | "alarm.cleared"
   | "order.updated"
-  | "heatmap.updated";
+  | "heatmap.updated"
+  | "allocation_skew.updated"
+  | "tote_origin_heatmap.updated";
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;
@@ -39,4 +41,20 @@ export interface KPIPayload {
   picks_per_hour: number;
   robot_utilization: number;
   avg_pick_time_s: number;
+}
+
+export interface AllocationStatsPayload {
+  total: number;
+  stations: Array<{
+    station_id: string;
+    name?: string;
+    count: number;
+    pct: number;
+    last_score?: number;
+  }>;
+}
+
+export interface ToteOriginHeatmapPayload {
+  allocated: Record<string, number>;
+  completed: Record<string, number>;
 }

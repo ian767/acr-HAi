@@ -104,11 +104,14 @@ class TaskExecutor:
             return task  # _retry_pending_tasks will dispatch when tote is free
 
         # Assign A42TD (rack -> cantilever).
+        # Multiple A42TDs can operate in parallel across different aisles.
+        import src.shared.simulation_state as _sim_state
         a42td = await self._fleet.find_nearest_idle(
             zone_id=source_loc.zone_id,
             robot_type=RobotType.A42TD,
             target_row=source_loc.grid_row,
             target_col=source_loc.grid_col,
+            aisle_rows=_sim_state.aisle_rows,
         )
         if a42td is not None:
             await self._fleet.assign_robot(a42td.id, task.id)
@@ -161,11 +164,13 @@ class TaskExecutor:
         station = await self._session.get(Station, station_id)
         search_row = station.grid_row if station else target_loc.grid_row
         search_col = station.grid_col if station else target_loc.grid_col
+        import src.shared.simulation_state as _sim_state_k
         k50h = await self._fleet.find_nearest_idle(
             zone_id=target_loc.zone_id,
             robot_type=RobotType.K50H,
             target_row=search_row,
             target_col=search_col,
+            aisle_rows=_sim_state_k.aisle_rows,
         )
         if k50h is not None:
             await self._fleet.assign_robot(k50h.id, task.id)
@@ -217,6 +222,10 @@ class TaskExecutor:
         # For RETRIEVE tasks, do NOT release K50H here — it holds the tote
         # at the station and will be released later by the return flow.
         if next_state == EquipmentTaskState.COMPLETED:
+            # Track tote origin completion (no DB hit — uses task cache).
+            from src.ess.application.tote_origin_tracker import get_tracker
+            get_tracker().record_completed_by_task(str(task.id))
+
             if task.a42td_robot_id is not None:
                 await self._fleet.release_robot(task.a42td_robot_id, task.id)
             if (

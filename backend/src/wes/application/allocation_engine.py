@@ -22,6 +22,37 @@ from src.wes.domain.enums import PickTaskState
 from src.wes.domain.models import Order, PickTask, Station
 
 
+# Module-level allocation counters — persist across requests within
+# the same process lifetime.  Reset on simulation restart.
+_allocation_counts: dict[str, int] = {}  # station_id → total orders
+_last_scores: dict[str, dict] = {}       # station_id → {name, score}
+
+
+def get_allocation_stats() -> dict:
+    """Return current allocation distribution stats (no DB query)."""
+    total = sum(_allocation_counts.values()) or 1
+    stations = []
+    for sid, count in _allocation_counts.items():
+        entry: dict = {
+            "station_id": sid,
+            "count": count,
+            "pct": round(count / total * 100, 1),
+        }
+        info = _last_scores.get(sid)
+        if info:
+            entry["name"] = info.get("name", sid[:8])
+            entry["last_score"] = round(info.get("score", 0.0), 3)
+        stations.append(entry)
+    stations.sort(key=lambda x: x["count"], reverse=True)
+    return {"total": sum(_allocation_counts.values()), "stations": stations}
+
+
+def reset_allocation_stats() -> None:
+    """Clear counters (call on simulation reset)."""
+    _allocation_counts.clear()
+    _last_scores.clear()
+
+
 class AllocationEngine:
     # Scoring weights
     W_QUEUE = 0.3
@@ -57,6 +88,10 @@ class AllocationEngine:
                 best_station = station
 
         assert best_station is not None
+        # Track allocation stats (in-memory, no DB)
+        sid = str(best_station.id)
+        _allocation_counts[sid] = _allocation_counts.get(sid, 0) + 1
+        _last_scores[sid] = {"name": best_station.name, "score": best_score}
         return best_station.id
 
     # ------------------------------------------------------------------

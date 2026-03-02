@@ -4,9 +4,8 @@ import { WarehouseMap } from "./components/map/WarehouseMap";
 import { MapLegend } from "./components/map/MapLegend";
 import { OrderCreatePanel } from "./components/OrderCreatePanel";
 import { StationWorkflow } from "./components/StationWorkflow";
-import { StationOperatorView } from "./components/StationOperatorView";
-import { PresetConfigurator } from "./components/PresetConfigurator";
 import { EditorToolbar } from "./components/map/EditorToolbar";
+import { AllocationStatsPanel } from "./components/AllocationStatsPanel";
 import { useUiStore } from "@/stores/useUiStore";
 import { useWarehouseStore } from "@/stores/useWarehouseStore";
 import { useZones } from "@/api/hooks";
@@ -48,12 +47,16 @@ const MAP_STYLE: React.CSSProperties = {
 };
 
 const PANEL_STYLE: React.CSSProperties = {
+  position: "absolute",
+  right: 0,
+  top: 0,
+  bottom: 0,
   width: 340,
   background: "#1a1d27",
   borderLeft: "1px solid #2d3148",
   padding: 16,
   overflowY: "auto",
-  flexShrink: 0,
+  zIndex: 20,
 };
 
 const BTN_STYLE: React.CSSProperties = {
@@ -120,6 +123,12 @@ export function WarehouseMapPage() {
   const togglePaths = useUiStore((s) => s.togglePaths);
   const showHeatmap = useUiStore((s) => s.showHeatmap);
   const toggleHeatmap = useUiStore((s) => s.toggleHeatmap);
+  const showAllocationStats = useUiStore((s) => s.showAllocationStats);
+  const toggleAllocationStats = useUiStore((s) => s.toggleAllocationStats);
+  const showToteOriginHeatmap = useUiStore((s) => s.showToteOriginHeatmap);
+  const toggleToteOriginHeatmap = useUiStore((s) => s.toggleToteOriginHeatmap);
+  const toteHeatmapMode = useUiStore((s) => s.toteHeatmapMode);
+  const setToteHeatmapMode = useUiStore((s) => s.setToteHeatmapMode);
   const selectedRobotId = useUiStore((s) => s.selectedRobotId);
   const selectRobot = useUiStore((s) => s.selectRobot);
   const editorMode = useUiStore((s) => s.editorMode);
@@ -129,11 +138,16 @@ export function WarehouseMapPage() {
   const resetWarehouse = useWarehouseStore((s) => s.resetAll);
   const selectedRobot = selectedRobotId ? robots[selectedRobotId] : null;
 
-  const [presets, setPresets] = useState<string[]>([]);
-  const [applyingPreset, setApplyingPreset] = useState(false);
-  const [showConfigurator, setShowConfigurator] = useState(false);
+  const [layouts, setLayouts] = useState<Array<{ name: string; file: string; rows: number; cols: number }>>([]);
+  const [selectedLayout, setSelectedLayout] = useState("");
+  const [layoutLoading, setLayoutLoading] = useState(false);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveLayoutName, setSaveLayoutName] = useState("");
+  const [savingLayout, setSavingLayout] = useState(false);
+  const [showNewDialog, setShowNewDialog] = useState(false);
+  const [newRows, setNewRows] = useState(20);
+  const [newCols, setNewCols] = useState(30);
   const [interactiveMode, setInteractiveMode] = useState(false);
-  const [operatorStationId, setOperatorStationId] = useState<string | null>(null);
 
   const stations = useWarehouseStore((s) => s.stations);
   const pickTasks = useWarehouseStore((s) => s.pickTasks);
@@ -145,52 +159,107 @@ export function WarehouseMapPage() {
     }
   }, [activeZoneId, zones, setActiveZone]);
 
-  // Fetch available presets on mount.
-  useEffect(() => {
-    essApi.simulationConfig().then((cfg: any) => {
-      if (cfg?.presets) setPresets(cfg.presets);
-      if (cfg?.interactive_mode != null) setInteractiveMode(cfg.interactive_mode);
-    });
+  // Fetch available layouts and config on mount.
+  const refreshLayouts = useCallback(async () => {
+    try {
+      const result: any = await essApi.gridListLayouts();
+      if (result?.layouts) setLayouts(result.layouts);
+    } catch {
+      // silently ignore
+    }
   }, []);
 
-  // Shared post-preset cleanup: invalidate caches, clear stale zone, refresh config.
-  // NOTE: Do NOT call resetWarehouse() here — the backend broadcasts a fresh
-  // snapshot via WS (before the HTTP response) that populates robots/stations.
-  // Calling resetWarehouse() after would wipe that data.
-  const refreshAfterPreset = useCallback(async () => {
-    setSimulationRunning(false);
-    selectRobot(null);
+  useEffect(() => {
+    refreshLayouts();
+    essApi.simulationConfig().then((cfg: any) => {
+      if (cfg?.interactive_mode != null) setInteractiveMode(cfg.interactive_mode);
+    });
+  }, [refreshLayouts]);
 
-    // Clear stale zone so auto-select picks the new one.
-    setActiveZone(null);
+  // -------------------------------------------------------- layout handlers
 
-    // Invalidate React Query caches so zones and grid refetch immediately.
-    await queryClient.invalidateQueries({ queryKey: ["zones"] });
-    await queryClient.invalidateQueries({ queryKey: ["grid"] });
+  const handleLoadLayout = useCallback(async () => {
+    if (!selectedLayout) return;
+    setLayoutLoading(true);
+    try {
+      await essApi.gridLoadInto(selectedLayout);
 
-    // Refresh config for presets list, wes_driven, interactive_mode.
-    const cfg: any = await essApi.simulationConfig();
-    if (cfg?.presets) setPresets(cfg.presets);
-    if (cfg?.interactive_mode != null) setInteractiveMode(cfg.interactive_mode);
-  }, [queryClient, setSimulationRunning, setActiveZone, selectRobot]);
+      // The load now does a full reconstruction (zone, stations, robots, etc.).
+      // Reset zone selection so auto-select picks the new zone.
+      setActiveZone(null);
+      selectRobot(null);
+      setSimulationRunning(false);
 
-  // -------------------------------------------------------- preset handler
+      await queryClient.invalidateQueries({ queryKey: ["zones"] });
+      await queryClient.invalidateQueries({ queryKey: ["grid"] });
 
-  const handleApplyPreset = useCallback(
-    async (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const name = e.target.value;
-      if (!name) return;
-      setApplyingPreset(true);
-      try {
-        await essApi.simulationApplyPreset(name);
-        await refreshAfterPreset();
-      } finally {
-        setApplyingPreset(false);
-        e.target.value = "";
+      // Refresh interactive_mode from config.
+      const cfg: any = await essApi.simulationConfig();
+      if (cfg?.interactive_mode != null) setInteractiveMode(cfg.interactive_mode);
+    } catch (err) {
+      alert("Failed to load layout: " + String(err));
+    } finally {
+      setLayoutLoading(false);
+    }
+  }, [selectedLayout, queryClient, setActiveZone, selectRobot, setSimulationRunning]);
+
+  const handleSaveLayout = useCallback(async () => {
+    const trimmed = saveLayoutName.trim();
+    if (!trimmed) return;
+    setSavingLayout(true);
+    try {
+      const activeZone = useUiStore.getState().activeZoneId;
+      const gridState: any = await essApi.getGrid(activeZone || undefined);
+      if (gridState) {
+        await essApi.gridSave({
+          name: trimmed,
+          rows: gridState.rows,
+          cols: gridState.cols,
+          cells: gridState.cells,
+        });
+        setSaveLayoutName("");
+        setShowSaveDialog(false);
+        await refreshLayouts();
       }
-    },
-    [refreshAfterPreset],
-  );
+    } catch (err) {
+      alert("Failed to save layout: " + String(err));
+    } finally {
+      setSavingLayout(false);
+    }
+  }, [saveLayoutName, refreshLayouts]);
+
+  const handleDeleteLayout = useCallback(async () => {
+    if (!selectedLayout) return;
+    const layoutInfo = layouts.find((l) => l.file === selectedLayout);
+    const displayName = layoutInfo?.name ?? selectedLayout;
+    if (!confirm(`Delete layout "${displayName}"?`)) return;
+    try {
+      await essApi.gridDeleteLayout(selectedLayout);
+      setSelectedLayout("");
+      await refreshLayouts();
+    } catch (err) {
+      alert("Failed to delete layout: " + String(err));
+    }
+  }, [selectedLayout, layouts, refreshLayouts]);
+
+  const handleNewLayout = useCallback(async () => {
+    if (newRows < 5 || newCols < 5) {
+      alert("Minimum grid size is 5x5");
+      return;
+    }
+    try {
+      await essApi.gridResize(newRows, newCols);
+      setShowNewDialog(false);
+      setActiveZone(null);
+      selectRobot(null);
+      setSimulationRunning(false);
+      resetWarehouse();
+      await queryClient.invalidateQueries({ queryKey: ["zones"] });
+      await queryClient.invalidateQueries({ queryKey: ["grid"] });
+    } catch (err) {
+      alert("Failed to create new layout: " + String(err));
+    }
+  }, [newRows, newCols, queryClient, setActiveZone, selectRobot, setSimulationRunning, resetWarehouse]);
 
   // -------------------------------------------------------- simulation controls
 
@@ -254,26 +323,45 @@ export function WarehouseMapPage() {
 
         <div style={{ width: 1, height: 24, background: "#4a5568" }} />
 
-        {/* Preset selector */}
-        <label style={LABEL_STYLE}>Preset</label>
+        {/* Layout manager */}
+        <label style={LABEL_STYLE}>Layout</label>
         <select
           style={{ ...SELECT_STYLE, minWidth: 140 }}
-          defaultValue=""
-          onChange={handleApplyPreset}
-          disabled={applyingPreset}
+          value={selectedLayout}
+          onChange={(e) => setSelectedLayout(e.target.value)}
         >
-          <option value="">{applyingPreset ? "Applying..." : "-- apply --"}</option>
-          {presets.map((p) => (
-            <option key={p} value={p}>
-              {p}
+          <option value="">-- select --</option>
+          {layouts.map((l) => (
+            <option key={l.file} value={l.file}>
+              {l.name} ({l.rows}x{l.cols})
             </option>
           ))}
         </select>
         <button
           style={BTN_STYLE}
-          onClick={() => setShowConfigurator(true)}
+          onClick={handleLoadLayout}
+          disabled={!selectedLayout || layoutLoading}
         >
-          Custom
+          {layoutLoading ? "Loading..." : "Load"}
+        </button>
+        <button
+          style={{ ...BTN_STYLE, borderColor: "#ef4444", color: "#ef4444" }}
+          onClick={handleDeleteLayout}
+          disabled={!selectedLayout}
+        >
+          Del
+        </button>
+        <button
+          style={BTN_STYLE}
+          onClick={() => setShowSaveDialog(true)}
+        >
+          Save As...
+        </button>
+        <button
+          style={{ ...BTN_STYLE, borderColor: "#22c55e", color: "#22c55e" }}
+          onClick={() => setShowNewDialog(true)}
+        >
+          New
         </button>
 
         <div style={{ width: 1, height: 24, background: "#4a5568" }} />
@@ -338,7 +426,45 @@ export function WarehouseMapPage() {
           />
           Heatmap
         </label>
-
+        <label style={{ ...LABEL_STYLE, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={showAllocationStats}
+            onChange={toggleAllocationStats}
+            style={{ marginRight: 4 }}
+          />
+          Allocation
+        </label>
+        <label style={{ ...LABEL_STYLE, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={showToteOriginHeatmap}
+            onChange={toggleToteOriginHeatmap}
+            style={{ marginRight: 4 }}
+          />
+          Tote Origins
+        </label>
+        {showToteOriginHeatmap && (
+          <select
+            value={toteHeatmapMode}
+            onChange={(e) =>
+              setToteHeatmapMode(
+                e.target.value as "allocated" | "completed",
+              )
+            }
+            style={{
+              background: "#2d3148",
+              color: "#e2e8f0",
+              border: "1px solid #4a5568",
+              borderRadius: 4,
+              padding: "2px 6px",
+              fontSize: 12,
+            }}
+          >
+            <option value="allocated">Allocated</option>
+            <option value="completed">Completed</option>
+          </select>
+        )}
         <div style={{ flex: 1 }} />
 
         {!editorMode && (
@@ -359,64 +485,25 @@ export function WarehouseMapPage() {
         <div style={MAP_STYLE}>
           <WarehouseMap />
           <MapLegend />
+          {showAllocationStats && <AllocationStatsPanel />}
         </div>
 
         {/* ---- Right panel ---- */}
-        {(interactiveMode || selectedRobot) && (
+        {(interactiveMode || selectedRobotId) && (
           <div style={PANEL_STYLE}>
-            {/* Selected robot details (collapsible top section) */}
-            {selectedRobot && (
-              <>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 8,
-                  }}
-                >
-                  <h3 style={{ margin: 0, fontSize: 13, color: "#94a3b8" }}>
-                    {selectedRobot.name ?? selectedRobotId!.slice(0, 8)}
-                  </h3>
-                  <button
-                    style={{
-                      ...BTN_STYLE,
-                      padding: "2px 8px",
-                      fontSize: 11,
-                    }}
-                    onClick={() => selectRobot(null)}
-                  >
-                    Close
-                  </button>
-                </div>
-                <InfoRow
-                  label="Status"
-                  value={
-                    <span
-                      style={{
-                        color: STATUS_COLORS[selectedRobot.status],
-                        fontWeight: 600,
-                      }}
-                    >
-                      {selectedRobot.status}
-                    </span>
-                  }
-                />
-                <InfoRow
-                  label="Position"
-                  value={`(${selectedRobot.row}, ${selectedRobot.col})`}
-                />
-                <InfoRow
-                  label="Path"
-                  value={
-                    selectedRobot.path
-                      ? `${selectedRobot.path.length} cells`
-                      : "none"
-                  }
-                />
-                <div style={{ height: 1, background: "#2d3148", margin: "12px 0" }} />
-              </>
+            {/* Selected robot details panel */}
+            {selectedRobotId && (
+              <RobotInfoPanel
+                robot={selectedRobot ?? null}
+                robotId={selectedRobotId}
+                pickTasks={pickTasks}
+                stations={stations}
+                onClose={() => selectRobot(null)}
+              />
             )}
+
+            {/* Queue Debug Panel */}
+            <QueueDebugPanel stations={stations} robots={robots} />
 
             {/* Interactive mode: Tabbed panel — Orders | Station */}
             {interactiveMode && <InteractivePanel />}
@@ -424,36 +511,632 @@ export function WarehouseMapPage() {
         )}
       </div>
 
-      {/* Station navigator overlay */}
-      <StationNavigator
-        stations={stations}
-        pickTasks={pickTasks}
-        onOpenStation={(id) => setOperatorStationId(id)}
-      />
-
-      {/* Station operator fullscreen view */}
-      {operatorStationId && (
-        <StationOperatorView
-          stationId={operatorStationId}
-          stationName={
-            stations.find((s) => s.id === operatorStationId)?.name
-            ?? `Station ${operatorStationId.slice(0, 8)}`
-          }
-          onClose={() => setOperatorStationId(null)}
-        />
+      {/* New layout dialog */}
+      {showNewDialog && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 100,
+          }}
+          onClick={() => setShowNewDialog(false)}
+        >
+          <div
+            style={{
+              background: "#1a1d27",
+              border: "1px solid #2d3148",
+              borderRadius: 10,
+              padding: 24,
+              width: 320,
+              color: "#e2e8f0",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>
+              New Layout
+            </h3>
+            <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+              <label style={{ flex: 1 }}>
+                <span style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
+                  Rows
+                </span>
+                <input
+                  type="number"
+                  min={5}
+                  max={100}
+                  value={newRows}
+                  onChange={(e) => setNewRows(parseInt(e.target.value) || 5)}
+                  style={{
+                    width: "100%",
+                    padding: "8px 12px",
+                    border: "1px solid #4a5568",
+                    borderRadius: 4,
+                    background: "#232738",
+                    color: "#e2e8f0",
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+              </label>
+              <label style={{ flex: 1 }}>
+                <span style={{ fontSize: 12, color: "#94a3b8", display: "block", marginBottom: 4 }}>
+                  Cols
+                </span>
+                <input
+                  type="number"
+                  min={5}
+                  max={100}
+                  value={newCols}
+                  onChange={(e) => setNewCols(parseInt(e.target.value) || 5)}
+                  style={{
+                    width: "100%",
+                    padding: "8px 12px",
+                    border: "1px solid #4a5568",
+                    borderRadius: 4,
+                    background: "#232738",
+                    color: "#e2e8f0",
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+              </label>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button style={BTN_STYLE} onClick={() => setShowNewDialog(false)}>
+                Cancel
+              </button>
+              <button
+                style={{ ...BTN_PRIMARY, background: "#22c55e", borderColor: "#22c55e" }}
+                onClick={handleNewLayout}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Preset configurator modal */}
-      {showConfigurator && (
-        <PresetConfigurator
-          onClose={() => setShowConfigurator(false)}
-          onApplied={async () => {
-            setShowConfigurator(false);
-            await refreshAfterPreset();
+      {/* Save layout dialog */}
+      {showSaveDialog && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 100,
           }}
-        />
+          onClick={() => setShowSaveDialog(false)}
+        >
+          <div
+            style={{
+              background: "#1a1d27",
+              border: "1px solid #2d3148",
+              borderRadius: 10,
+              padding: 24,
+              width: 360,
+              color: "#e2e8f0",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>
+              Save Layout
+            </h3>
+            <input
+              type="text"
+              placeholder="Layout name"
+              value={saveLayoutName}
+              onChange={(e) => setSaveLayoutName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSaveLayout()}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #4a5568",
+                borderRadius: 4,
+                background: "#232738",
+                color: "#e2e8f0",
+                fontSize: 14,
+                boxSizing: "border-box",
+                marginBottom: 16,
+              }}
+              autoFocus
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button style={BTN_STYLE} onClick={() => setShowSaveDialog(false)}>
+                Cancel
+              </button>
+              <button
+                style={BTN_PRIMARY}
+                onClick={handleSaveLayout}
+                disabled={!saveLayoutName.trim() || savingLayout}
+              >
+                {savingLayout ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ QueueDebugPanel
+
+function QueueDebugPanel({
+  stations,
+  robots,
+}: {
+  stations: import("@/types/station").Station[];
+  robots: Record<string, import("@/types/robot").RobotRealtime>;
+}) {
+  // Helper: resolve robot_id to short name
+  const robotName = (rid: string | null) => {
+    if (!rid) return "\u2014";
+    const r = robots[rid];
+    return r?.name ?? rid.slice(0, 8);
+  };
+
+  // Helper: detect approach ghost (only for IDLE robots far from approach)
+  const isApproachGhost = (station: import("@/types/station").Station) => {
+    const qs = station.queue_state;
+    if (!qs?.approach) return false;
+    const r = robots[qs.approach];
+    if (!r) return true; // robot not found = ghost
+    const aRow = station.approach_cell_row ?? station.grid_row;
+    const aCol = station.approach_cell_col ?? station.grid_col;
+    const dist = Math.abs(r.row - aRow) + Math.abs(r.col - aCol);
+    // Only flag as ghost if IDLE and far — WAITING/MOVING robots may be
+    // recently promoted and en route to approach cell.
+    return dist > 2 && r.status === "IDLE";
+  };
+
+  const stationsWithQueue = stations.filter((s) => s.queue_state);
+  if (stationsWithQueue.length === 0) return null;
+
+  return (
+    <>
+      <div
+        style={{
+          fontSize: 11,
+          color: "#f59e0b",
+          textTransform: "uppercase",
+          letterSpacing: 1,
+          marginBottom: 8,
+        }}
+      >
+        Queue Debug
+      </div>
+      {stationsWithQueue.map((s) => {
+        const qs = s.queue_state!;
+        const ghost = isApproachGhost(s);
+        return (
+          <div
+            key={s.id}
+            style={{
+              background: "#141720",
+              borderRadius: 6,
+              padding: 10,
+              marginBottom: 8,
+              border: ghost ? "1px solid #ef4444" : "1px solid #334155",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: "#e2e8f0",
+                marginBottom: 6,
+              }}
+            >
+              {s.name}
+            </div>
+            <InfoRow label="Station" value={robotName(qs.station)} />
+            <InfoRow
+              label="Approach"
+              value={
+                <span>
+                  {robotName(qs.approach)}
+                  {ghost && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        color: "#ef4444",
+                        fontWeight: 700,
+                        fontSize: 10,
+                        padding: "1px 4px",
+                        borderRadius: 3,
+                        background: "rgba(239,68,68,0.15)",
+                      }}
+                    >
+                      GHOST
+                    </span>
+                  )}
+                </span>
+              }
+            />
+            {qs.queue.map((rid, i) => (
+              <InfoRow key={i} label={`Q${i + 1}`} value={robotName(rid)} />
+            ))}
+            {qs.holding !== undefined && (
+              <InfoRow label="Holding" value={robotName(qs.holding)} />
+            )}
+            {qs._version_tick != null && (
+              <InfoRow label="Tick" value={String(qs._version_tick)} />
+            )}
+            {qs._mutation_reason && (
+              <InfoRow
+                label="Reason"
+                value={
+                  <span style={{ fontSize: 10, color: "#94a3b8" }}>
+                    {qs._mutation_reason}
+                  </span>
+                }
+              />
+            )}
+          </div>
+        );
+      })}
+      <div style={{ height: 1, background: "#2d3148", margin: "12px 0" }} />
+    </>
+  );
+}
+
+// ------------------------------------------------------------------ RobotInfoPanel
+
+const HEADING_LABELS: Record<number, string> = {
+  0: "N", 90: "E", 180: "S", 270: "W",
+};
+
+const TYPE_COLORS: Record<string, string> = {
+  K50H: "#22c55e",
+  A42TD: "#3b82f6",
+};
+
+function RobotInfoPanel({
+  robot,
+  robotId,
+  pickTasks,
+  stations,
+  onClose,
+}: {
+  robot: import("@/types/robot").RobotRealtime | null;
+  robotId: string;
+  pickTasks: import("@/types/pickTask").PickTask[];
+  stations: import("@/types/station").Station[];
+  onClose: () => void;
+}) {
+  if (!robot) {
+    return (
+      <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>{robotId.slice(0, 8)}</h3>
+          <button style={{ ...BTN_STYLE, padding: "2px 8px", fontSize: 11 }} onClick={onClose}>Close</button>
+        </div>
+        <p style={{ fontSize: 12, color: "#64748b" }}>Loading robot data...</p>
+        <div style={{ height: 1, background: "#2d3148", margin: "12px 0" }} />
+      </>
+    );
+  }
+
+  // Find linked pick task
+  const linkedTask = robot.hold_pick_task_id
+    ? pickTasks.find((t) => t.id === robot.hold_pick_task_id)
+    : null;
+
+  // Find reserved station (from linked task or reservation)
+  const reservedStation = linkedTask
+    ? stations.find((s) => s.id === linkedTask.station_id)
+    : null;
+
+  const headingLabel = HEADING_LABELS[robot.heading] ?? `${robot.heading}°`;
+
+  return (
+    <>
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: TYPE_COLORS[robot.type ?? ""] ?? "#9ca3af",
+            }}
+          />
+          <h3 style={{ margin: 0, fontSize: 14, color: "#e2e8f0" }}>
+            {robot.name ?? robotId.slice(0, 8)}
+          </h3>
+          <span
+            style={{
+              fontSize: 11,
+              padding: "1px 6px",
+              borderRadius: 3,
+              background: "#2d3148",
+              color: "#94a3b8",
+            }}
+          >
+            {robot.type ?? "Unknown"}
+          </span>
+        </div>
+        <button
+          style={{ ...BTN_STYLE, padding: "2px 8px", fontSize: 11 }}
+          onClick={onClose}
+        >
+          Close
+        </button>
+      </div>
+
+      {/* Status & Position */}
+      <div
+        style={{
+          background: "#141720",
+          borderRadius: 6,
+          padding: 10,
+          marginBottom: 10,
+        }}
+      >
+        <InfoRow
+          label="Status"
+          value={
+            <span
+              style={{
+                color: STATUS_COLORS[robot.status],
+                fontWeight: 600,
+              }}
+            >
+              {robot.status}
+            </span>
+          }
+        />
+        <InfoRow label="Position" value={`(${robot.row}, ${robot.col})`} />
+        <InfoRow label="Heading" value={headingLabel} />
+        <InfoRow
+          label="Path"
+          value={
+            robot.path ? `${robot.path.length} cells remaining` : "No path"
+          }
+        />
+      </div>
+
+      {/* Diagnostics */}
+      {(() => {
+        let diagLabel = "OK";
+        let diagColor = "#22c55e";
+        const hasPath = robot.path && robot.path.length > 0;
+        const wt = robot.wait_ticks ?? 0;
+        if (robot.status === "WAITING" && !hasPath) {
+          diagLabel = "Stuck: no path";
+          diagColor = "#ef4444";
+        } else if (robot.status === "WAITING" && wt > 0) {
+          const reason = robot.blocked_reason ?? "UNKNOWN";
+          const by = robot.blocked_by ?? "?";
+          const age = robot.blocked_age ?? 0;
+          diagLabel = `Blocked by ${by} (${reason}, ${age}t)`;
+          diagColor = "#ef4444";
+        } else if (robot.status === "WAITING_FOR_STATION") {
+          diagLabel = "At station: awaiting scan";
+          diagColor = "#a855f7";
+        } else if (robot.status === "IDLE" && !robot.task_type) {
+          diagLabel = "Idle: awaiting dispatch";
+          diagColor = "#f59e0b";
+        } else if (robot.status === "IDLE") {
+          diagLabel = "Idle: has task";
+          diagColor = "#f59e0b";
+        }
+        return (
+          <div
+            style={{
+              background: "#141720",
+              borderRadius: 6,
+              padding: 10,
+              marginBottom: 10,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                color: "#64748b",
+                textTransform: "uppercase",
+                letterSpacing: 1,
+                marginBottom: 6,
+              }}
+            >
+              Diagnostics
+            </div>
+            <InfoRow
+              label="State"
+              value={
+                <span style={{ color: diagColor, fontWeight: 600 }}>
+                  {diagLabel}
+                </span>
+              }
+            />
+            {wt > 0 && <InfoRow label="Wait Ticks" value={String(wt)} />}
+          </div>
+        );
+      })()}
+
+      {/* Target */}
+      {robot.target_row != null && (
+        <div
+          style={{
+            background: "#141720",
+            borderRadius: 6,
+            padding: 10,
+            marginBottom: 10,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 11,
+              color: "#64748b",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              marginBottom: 6,
+            }}
+          >
+            Target
+          </div>
+          <InfoRow
+            label="Target Cell"
+            value={`(${robot.target_row}, ${robot.target_col})`}
+          />
+          {robot.target_station && (
+            <InfoRow label="Station" value={robot.target_station} />
+          )}
+        </div>
+      )}
+
+      {/* Task Info */}
+      <div
+        style={{
+          background: "#141720",
+          borderRadius: 6,
+          padding: 10,
+          marginBottom: 10,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            color: "#64748b",
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            marginBottom: 6,
+          }}
+        >
+          Task
+        </div>
+        <InfoRow
+          label="Task Type"
+          value={
+            robot.task_type ? (
+              <span
+                style={{
+                  color: robot.task_type === "RETRIEVE" ? "#f59e0b" : "#8b5cf6",
+                  fontWeight: 600,
+                }}
+              >
+                {robot.task_type === "RETRIEVE" ? "RETRIEVE" : "RETURN"}
+              </span>
+            ) : (
+              <span style={{ color: "#64748b" }}>None</span>
+            )
+          }
+        />
+        <InfoRow
+          label="Carrying Tote"
+          value={
+            robot.hold_pick_task_id ? (
+              <span style={{ color: "#f59e0b", fontWeight: 600 }}>Yes</span>
+            ) : (
+              <span style={{ color: "#64748b" }}>No</span>
+            )
+          }
+        />
+        <InfoRow
+          label="At Station"
+          value={
+            robot.hold_at_station ? (
+              <span style={{ color: "#22c55e" }}>Yes</span>
+            ) : (
+              <span style={{ color: "#64748b" }}>No</span>
+            )
+          }
+        />
+      </div>
+
+      {/* Linked Pick Task */}
+      {linkedTask && (
+        <div
+          style={{
+            background: "#141720",
+            borderRadius: 6,
+            padding: 10,
+            marginBottom: 10,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 11,
+              color: "#64748b",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              marginBottom: 6,
+            }}
+          >
+            Pick Task
+          </div>
+          <InfoRow label="SKU" value={linkedTask.sku} />
+          <InfoRow
+            label="State"
+            value={
+              <span style={{ color: "#3b82f6", fontWeight: 600 }}>
+                {linkedTask.state}
+              </span>
+            }
+          />
+          <InfoRow
+            label="Qty"
+            value={`${linkedTask.qty_picked} / ${linkedTask.qty_to_pick}`}
+          />
+          {linkedTask.source_tote_id && (
+            <InfoRow
+              label="Source Tote"
+              value={linkedTask.source_tote_id.slice(0, 8)}
+            />
+          )}
+          {linkedTask.target_tote_barcode && (
+            <InfoRow label="Target Tote" value={linkedTask.target_tote_barcode} />
+          )}
+        </div>
+      )}
+
+      {/* Linked Station */}
+      {reservedStation && (
+        <div
+          style={{
+            background: "#141720",
+            borderRadius: 6,
+            padding: 10,
+            marginBottom: 10,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 11,
+              color: "#64748b",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              marginBottom: 6,
+            }}
+          >
+            Destination Station
+          </div>
+          <InfoRow label="Station" value={reservedStation.name} />
+          <InfoRow
+            label="Position"
+            value={`(${reservedStation.grid_row}, ${reservedStation.grid_col})`}
+          />
+        </div>
+      )}
+
+      <div style={{ height: 1, background: "#2d3148", margin: "12px 0" }} />
+    </>
   );
 }
 
@@ -488,162 +1171,6 @@ function InteractivePanel() {
 
       {tab === "orders" && <OrderCreatePanel />}
       {tab === "station" && <StationWorkflow />}
-    </div>
-  );
-}
-
-// ------------------------------------------------------------------ StationNavigator
-
-function StationNavigator({
-  stations,
-  pickTasks,
-  onOpenStation,
-}: {
-  stations: import("@/types/station").Station[];
-  pickTasks: import("@/types/pickTask").PickTask[];
-  onOpenStation: (stationId: string) => void;
-}) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  if (stations.length === 0) return null;
-
-  // Count active tasks per station
-  const taskCounts: Record<string, { active: number; pending: number }> = {};
-  for (const task of pickTasks) {
-    if (!task.station_id) continue;
-    if (!taskCounts[task.station_id]) {
-      taskCounts[task.station_id] = { active: 0, pending: 0 };
-    }
-    const counts = taskCounts[task.station_id]!;
-    if (task.state === "SOURCE_AT_STATION" || task.state === "PICKING") {
-      counts.active++;
-    } else if (task.state === "SOURCE_REQUESTED" || task.state === "SOURCE_AT_CANTILEVER") {
-      counts.pending++;
-    }
-  }
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        bottom: 16,
-        right: 16,
-        zIndex: 100,
-        background: "#1a1d27ee",
-        border: "1px solid #2d3148",
-        borderRadius: 8,
-        minWidth: 180,
-        backdropFilter: "blur(8px)",
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "8px 12px",
-          borderBottom: collapsed ? "none" : "1px solid #2d3148",
-          cursor: "pointer",
-        }}
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>
-          Stations ({stations.length})
-        </span>
-        <span style={{ fontSize: 10, color: "#64748b" }}>
-          {collapsed ? "\u25B2" : "\u25BC"}
-        </span>
-      </div>
-
-      {/* Station list */}
-      {!collapsed && (
-        <div style={{ padding: "4px 8px 8px" }}>
-          {stations.map((station) => {
-            const counts = taskCounts[station.id];
-            const activeCount = counts?.active ?? 0;
-            const pendingCount = counts?.pending ?? 0;
-
-            return (
-              <button
-                key={station.id}
-                onClick={() => onOpenStation(station.id)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  width: "100%",
-                  padding: "6px 8px",
-                  marginBottom: 2,
-                  border: "1px solid transparent",
-                  borderRadius: 6,
-                  background: "transparent",
-                  color: "#e2e8f0",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  textAlign: "left",
-                  transition: "background 0.15s, border-color 0.15s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "#2d314880";
-                  e.currentTarget.style.borderColor = "#3b82f644";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
-                  e.currentTarget.style.borderColor = "transparent";
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {/* Online indicator dot */}
-                  <span
-                    style={{
-                      display: "inline-block",
-                      width: 6,
-                      height: 6,
-                      borderRadius: 3,
-                      background: station.is_online ? "#22c55e" : "#6b7280",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span style={{ fontWeight: 500 }}>{station.name}</span>
-                </div>
-
-                {/* Task badges */}
-                <div style={{ display: "flex", gap: 4 }}>
-                  {activeCount > 0 && (
-                    <span
-                      style={{
-                        padding: "1px 5px",
-                        borderRadius: 8,
-                        fontSize: 10,
-                        fontWeight: 600,
-                        background: "#22c55e",
-                        color: "#fff",
-                      }}
-                    >
-                      {activeCount}
-                    </span>
-                  )}
-                  {pendingCount > 0 && (
-                    <span
-                      style={{
-                        padding: "1px 5px",
-                        borderRadius: 8,
-                        fontSize: 10,
-                        fontWeight: 600,
-                        background: "#eab308",
-                        color: "#fff",
-                      }}
-                    >
-                      {pendingCount}
-                    </span>
-                  )}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }

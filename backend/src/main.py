@@ -52,9 +52,15 @@ async def lifespan(app: FastAPI):
                 ("stations", "holding_cell_col", "INTEGER"),
                 ("stations", "queue_cells_json", "TEXT"),
                 ("stations", "current_robot_id", "VARCHAR(36)"),
+                ("stations", "queue_state_json", "TEXT"),
                 # Tote barcode denormalization
                 ("pick_tasks", "target_tote_barcode", "VARCHAR(100)"),
                 ("put_wall_slots", "target_tote_barcode", "VARCHAR(100)"),
+                # A42TD territory columns
+                ("robots", "territory_col_min", "INTEGER"),
+                ("robots", "territory_col_max", "INTEGER"),
+                ("robots", "territory_row_min", "INTEGER"),
+                ("robots", "territory_row_max", "INTEGER"),
             ]
             for table, col, col_type in _MIGRATIONS:
                 try:

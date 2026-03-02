@@ -1,0 +1,882 @@
+{
+  "name": "2",
+  "rows": 30,
+  "cols": 30,
+  "cells": [
+    {
+      "row": 0,
+      "col": 29,
+      "type": "CHARGING"
+    },
+    {
+      "row": 2,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 8,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 2,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 17,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 2,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 2,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 8,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 17,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 3,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 8,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 5,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 17,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 5,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 5,
+      "col": 29,
+      "type": "CHARGING"
+    },
+    {
+      "row": 6,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 8,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 17,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 6,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 8,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 8,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 17,
+      "type": "IDLE_POINT"
+    },
+    {
+      "row": 8,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 8,
+      "col": 29,
+      "type": "CHARGING"
+    },
+    {
+      "row": 9,
+      "col": 2,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 3,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 4,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 5,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 6,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 7,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 8,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 9,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 10,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 11,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 14,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 15,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 16,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 17,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 18,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 19,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 20,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 21,
+      "type": "RACK"
+    },
+    {
+      "row": 9,
+      "col": 22,
+      "type": "RACK"
+    },
+    {
+      "row": 18,
+      "col": 0,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 1,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 2,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 3,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 4,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 5,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 6,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 7,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 8,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 9,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 11,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 12,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 13,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 14,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 15,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 16,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 17,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 18,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 19,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 21,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 22,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 23,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 24,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 25,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 26,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 27,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 28,
+      "type": "WALL"
+    },
+    {
+      "row": 18,
+      "col": 29,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 0,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 1,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 2,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 3,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 4,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 5,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 6,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 7,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 8,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 9,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 10,
+      "type": "STATION"
+    },
+    {
+      "row": 28,
+      "col": 11,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 12,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 13,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 14,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 15,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 16,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 17,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 18,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 19,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 20,
+      "type": "STATION"
+    },
+    {
+      "row": 28,
+      "col": 21,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 22,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 23,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 24,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 25,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 26,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 27,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 28,
+      "type": "WALL"
+    },
+    {
+      "row": 28,
+      "col": 29,
+      "type": "WALL"
+    }
+  ]
+}

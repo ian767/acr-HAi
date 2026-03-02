@@ -13,7 +13,20 @@ export const essApi = {
 
   getRobot: (id: string) => api.get<Robot>(`/ess/robots/${id}`),
 
-  getGrid: (zoneId: string) => api.get<GridState>(`/ess/grid?zone_id=${zoneId}`),
+  createRobot: (data: { type: string; row: number; col: number }) =>
+    api.post(`/ess/robots`, data),
+
+  deleteRobot: (id: string) => api.delete(`/ess/robots/${id}`),
+
+  updateRobotTerritory: (id: string, data: {
+    col_min: number | null; col_max: number | null;
+    row_min: number | null; row_max: number | null;
+  }) => api.put(`/ess/robots/${id}/territory`, data),
+
+  getGrid: (zoneId?: string) => {
+    const qs = zoneId ? `?zone_id=${zoneId}` : "";
+    return api.get<GridState>(`/ess/grid${qs}`);
+  },
 
   listZones: () => api.get<Zone[]>(`/ess/zones`),
 
@@ -44,6 +57,8 @@ export const essApi = {
     api.post(`/ess/grid/cell`, { row, col, cell_type: cellType }),
 
   gridLoadInto: (name: string) => api.post(`/ess/grid/load/${name}`),
+
+  gridDeleteLayout: (name: string) => api.delete(`/ess/grid/layouts/${name}`),
 
   gridResize: (rows: number, cols: number) =>
     api.post(`/ess/grid/resize?rows=${rows}&cols=${cols}`),

@@ -51,6 +51,12 @@ class Robot(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     hold_at_station: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # A42TD territory: rectangular grid area the robot is restricted to.
+    territory_col_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    territory_col_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    territory_row_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    territory_row_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
 
 class Zone(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "zones"

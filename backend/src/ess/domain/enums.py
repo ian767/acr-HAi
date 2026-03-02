@@ -24,6 +24,7 @@ class CellType(str, enum.Enum):
     AISLE = "AISLE"
     WALL = "WALL"
     CHARGING = "CHARGING"
+    IDLE_POINT = "IDLE_POINT"
 
 
 class ToteStatus(str, enum.Enum):

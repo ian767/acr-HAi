@@ -6,6 +6,15 @@ export interface QueueCell {
   col: number;
 }
 
+export interface QueueState {
+  station: string | null;
+  approach: string | null;
+  queue: (string | null)[];
+  holding: string | null;
+  _version_tick?: number;
+  _mutation_reason?: string;
+}
+
 export interface Station {
   id: string;
   name: string;
@@ -21,6 +30,9 @@ export interface Station {
   holding_cell_col?: number | null;
   queue_cells?: QueueCell[];
   current_robot_id?: string | null;
+  queue_state?: QueueState | null;
+  queue_state_version_tick?: number | null;
+  last_queue_mutation_reason?: string | null;
 }
 
 export interface PutWallSlot {

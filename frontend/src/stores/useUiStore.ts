@@ -29,11 +29,22 @@ interface UiState {
   activeZoneId: string | null;
   setActiveZone: (id: string | null) => void;
 
+  // Allocation skew diagnostic
+  showAllocationStats: boolean;
+  toggleAllocationStats: () => void;
+
+  // Tote origin heatmap
+  showToteOriginHeatmap: boolean;
+  toteHeatmapMode: "allocated" | "completed";
+  toggleToteOriginHeatmap: () => void;
+  setToteHeatmapMode: (mode: "allocated" | "completed") => void;
+
   // Map editor
   editorMode: boolean;
   editorTool: string;
   setEditorMode: (on: boolean) => void;
   setEditorTool: (tool: string) => void;
+
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -59,6 +70,14 @@ export const useUiStore = create<UiState>((set) => ({
 
   activeZoneId: null,
   setActiveZone: (id) => set({ activeZoneId: id }),
+
+  showAllocationStats: false,
+  toggleAllocationStats: () => set((s) => ({ showAllocationStats: !s.showAllocationStats })),
+
+  showToteOriginHeatmap: false,
+  toteHeatmapMode: "allocated" as const,
+  toggleToteOriginHeatmap: () => set((s) => ({ showToteOriginHeatmap: !s.showToteOriginHeatmap })),
+  setToteHeatmapMode: (mode) => set({ toteHeatmapMode: mode }),
 
   editorMode: false,
   editorTool: "RACK",

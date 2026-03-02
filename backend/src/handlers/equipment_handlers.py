@@ -17,6 +17,34 @@ from src.shared.event_bus import EventBus
 logger = logging.getLogger(__name__)
 
 
+async def _advance_waiting_robot(session, station_id) -> None:
+    """After a robot leaves the station, clear approach/station slots.
+
+    FIFO pull (_pull_advance_queues) handles advancing the next robot
+    from Q1→A on the next tick.  Do NOT call advance_queue() or reroute
+    here — those bypass the single-lane pull chain.
+    """
+    from src.wes.domain.models import Station
+    from src.wes.application.station_queue_service import StationQueueService
+
+    station = await session.get(Station, station_id)
+    if station is None:
+        return
+
+    qsvc = StationQueueService(session)
+    qs = qsvc._get_queue_state(station)
+
+    # Clear station + approach slots (robot has left)
+    if qs.get("station"):
+        qs["station"] = None
+        station.current_robot_id = None
+    if qs.get("approach"):
+        qs["approach"] = None
+    qsvc._save_queue_state(station, qs, reason="station_release")
+    await session.flush()
+    logger.info("Station %s: cleared approach/station slots (FIFO pull will advance)", station.name)
+
+
 def register(bus: EventBus) -> None:
     from src.wes.domain.events import RetrieveSourceTote, ReturnSourceTote
 
@@ -44,6 +72,17 @@ async def _handle_retrieve_source_tote(event) -> None:
             station_id=event.station_id,
         )
 
+        # Track tote origin for heatmap (before path planning).
+        try:
+            _src_loc = await session.get(Location, event.source_location_id)
+            if _src_loc:
+                from src.ess.application.tote_origin_tracker import get_tracker
+                get_tracker().record_allocated(
+                    str(eq_task.id), _src_loc.grid_row, _src_loc.grid_col,
+                )
+        except Exception:
+            pass  # Non-critical tracking
+
         if eq_task.a42td_robot_id is not None and simulation_state.grid:
             robot = await svc.fm.get_robot(eq_task.a42td_robot_id)
             # Use Redis position (simulation state) if available.
@@ -57,6 +96,15 @@ async def _handle_retrieve_source_tote(event) -> None:
             source_loc = await session.get(Location, event.source_location_id)
             ref_row = source_loc.grid_row if source_loc else start[0]
             ref_col = source_loc.grid_col if source_loc else start[1]
+
+            # Extract territory for A42TD pathfinding constraints.
+            from src.ess.domain.enums import RobotType as _RobotType
+            _a42_tcols = None
+            _a42_trows = None
+            if robot.territory_col_min is not None:
+                _a42_tcols = (robot.territory_col_min, robot.territory_col_max)
+            if getattr(robot, "territory_row_min", None) is not None:
+                _a42_trows = (robot.territory_row_min, robot.territory_row_max)
 
             # Collect rack-edge cells already targeted by other active A42TDs.
             from src.ess.infrastructure.redis_cache import RobotStateCache
@@ -82,21 +130,39 @@ async def _handle_retrieve_source_tote(event) -> None:
                         )
                         if other_re:
                             avoid.add(other_re)
+                # Also avoid rack-edge cells near A42TDs currently in aisle rows
+                if other.a42td_robot_id:
+                    other_pos = await get_robot_position(other.a42td_robot_id)
+                    if other_pos and other_pos[0] in simulation_state.aisle_rows:
+                        aisle_re = find_nearest_rack_edge(
+                            simulation_state.grid, other_pos[0], other_pos[1],
+                        )
+                        if aisle_re:
+                            avoid.add(aisle_re)
 
+            # Per-aisle rack-edge: A42TD hands off on its own territory row,
+            # not the global rack_edge_row.  This keeps each A42TD in its
+            # aisle and avoids bottlenecks at the global cantilever row.
             rack_edge = find_nearest_rack_edge(
-                simulation_state.grid, ref_row, ref_col, avoid_cells=avoid,
+                simulation_state.grid, ref_row, ref_col,
+                avoid_cells=avoid, territory_rows=_a42_trows,
             )
-            # If all nearby cells are taken, fall back to any rack-edge cell.
+            # If all nearby cells are taken, fall back without avoid.
             if rack_edge is None:
                 rack_edge = find_nearest_rack_edge(
                     simulation_state.grid, ref_row, ref_col,
+                    territory_rows=_a42_trows,
                 )
+
             planned = None
             if rack_edge is not None:
                 planned = await plan_and_store_path(
                     svc, robot.id,
                     start,
                     rack_edge,
+                    robot_type=_RobotType.A42TD,
+                    territory_cols=_a42_tcols,
+                    territory_rows=_a42_trows,
                 )
             elif source_loc is not None:
                 # Fallback: use the source location directly (legacy path).
@@ -104,6 +170,9 @@ async def _handle_retrieve_source_tote(event) -> None:
                     svc, robot.id,
                     start,
                     (source_loc.grid_row, source_loc.grid_col),
+                    robot_type=_RobotType.A42TD,
+                    territory_cols=_a42_tcols,
+                    territory_rows=_a42_trows,
                 )
 
             await svc.executor.advance_task(eq_task.id, "a42td_dispatched")
@@ -148,6 +217,26 @@ async def _handle_return_source_tote(event) -> None:
         from sqlalchemy import select
         import src.shared.simulation_state as simulation_state
 
+        # ── Idempotency guard (MUST be before release logic) ──
+        # If a RETURN task already exists, a prior invocation already released
+        # the serving K50H.  Skip entirely to avoid releasing the NEXT robot
+        # that was promoted into the station slot by advance_queue.
+        from src.ess.domain.models import EquipmentTask as _ET_guard
+        from src.ess.domain.enums import EquipmentTaskType as _ETT_guard
+        _existing_guard = await session.execute(
+            select(_ET_guard).where(
+                _ET_guard.pick_task_id == event.pick_task_id,
+                _ET_guard.type == _ETT_guard.RETURN,
+            ).limit(1)
+        )
+        if _existing_guard.scalar_one_or_none() is not None:
+            logger.info(
+                "RETURN task already exists for pick_task %s — skipping ReturnSourceTote entirely",
+                event.pick_task_id,
+            )
+            await session.commit()
+            return
+
         # --- Release the K50H that's holding the tote at the station ---
         # It's stuck in WAITING_FOR_STATION; we need to free it for the return trip.
         result = await session.execute(
@@ -187,40 +276,37 @@ async def _handle_return_source_tote(event) -> None:
             await qsvc.release_station(event.station_id, k50h_at_station.id)
             await session.flush()
 
+            # FIFO queue advance: re-route any K50H waiting in queue
+            # now that the station is free.
+            await _advance_waiting_robot(session, event.station_id)
+
             logger.info(
                 "Released K50H %s from WAITING_FOR_STATION for return flow",
                 k50h_at_station.id,
             )
         else:
             # K50H not found with hold_at_station=True (simulator may have
-            # cleared it already). Still clean up station.current_robot_id
-            # to prevent stale references allowing scans without a robot.
+            # cleared it already).  Only null out current_robot_id — do NOT
+            # call release_station() which would clear_robot_from_all_queues
+            # on whoever was just promoted into the station slot by
+            # advance_queue (the "queue dissolve" bug).
             station = await session.get(Station, event.station_id)
             if station is not None and station.current_robot_id is not None:
+                # Clear only the station-level pointer; queue slots are
+                # managed by advance_queue and should not be touched.
                 qsvc = StationQueueService(session)
-                await qsvc.release_station(event.station_id, station.current_robot_id)
+                qs = qsvc._get_queue_state(station)
+                if qs.get("station"):
+                    qs["station"] = None
+                    qsvc._save_queue_state(station, qs, reason="return_stale_cleanup")
+                else:
+                    station.current_robot_id = None
                 await session.flush()
+                await _advance_waiting_robot(session, event.station_id)
                 logger.info(
                     "Cleaned up stale station.current_robot_id at station %s",
                     event.station_id,
                 )
-
-        # Guard: skip if a RETURN equipment task already exists for this pick task
-        from src.ess.domain.models import EquipmentTask
-        from src.ess.domain.enums import EquipmentTaskType
-        existing = await session.execute(
-            select(EquipmentTask).where(
-                EquipmentTask.pick_task_id == event.pick_task_id,
-                EquipmentTask.type == EquipmentTaskType.RETURN,
-            ).limit(1)
-        )
-        if existing.scalar_one_or_none() is not None:
-            logger.info(
-                "RETURN task already exists for pick_task %s — skipping",
-                event.pick_task_id,
-            )
-            await session.commit()
-            return
 
         svc = HandlerServices(session)
         eq_task = await svc.executor.execute_return(

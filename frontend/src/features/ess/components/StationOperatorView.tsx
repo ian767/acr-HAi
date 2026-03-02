@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { wesApi } from "@/api/wes";
 import type { PickTask, PutWallSlot } from "@/types/pickTask";
@@ -141,21 +141,60 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
   const [exceptionReason, setExceptionReason] = useState("");
   const flashTimeout = useRef<ReturnType<typeof setTimeout>>();
 
+  // Stable state updaters: only call setState if JSON content actually changed.
+  // This prevents re-renders (and loss of text selection) when poll returns identical data.
+  const pickTasksJsonRef = useRef<string>("");
+  const ordersJsonRef = useRef<string>("");
+  const putwallJsonRef = useRef<string>("");
+
+  const stableSetPickTasks = useCallback((data: PickTask[]) => {
+    const json = JSON.stringify(data);
+    if (json !== pickTasksJsonRef.current) {
+      pickTasksJsonRef.current = json;
+      setPickTasks(data);
+    }
+  }, []);
+
+  const stableSetOrders = useCallback((data: Order[]) => {
+    const json = JSON.stringify(data);
+    if (json !== ordersJsonRef.current) {
+      ordersJsonRef.current = json;
+      setOrders(data);
+    }
+  }, []);
+
+  const stableSetPutwallSlots = useCallback((data: PutWallSlot[]) => {
+    const json = JSON.stringify(data);
+    if (json !== putwallJsonRef.current) {
+      putwallJsonRef.current = json;
+      setPutwallSlots(data);
+    }
+  }, []);
+
   // Poll pick tasks + orders + putwall
   useEffect(() => {
     const load = () => {
-      wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
-      wesApi.listOrders({ limit: 50 }).then(setOrders).catch(() => {});
-      wesApi.getPutwall(stationId).then(setPutwallSlots).catch(() => {});
+      wesApi.listPickTasks({ station_id: stationId }).then(stableSetPickTasks).catch(() => {});
+      wesApi.listOrders({ limit: 50 }).then(stableSetOrders).catch(() => {});
+      wesApi.getPutwall(stationId).then(stableSetPutwallSlots).catch(() => {});
     };
     load();
     const id = setInterval(load, 1500);
     return () => clearInterval(id);
-  }, [stationId]);
+  }, [stationId, stableSetPickTasks, stableSetOrders, stableSetPutwallSlots]);
 
-  // Auto-focus barcode input
+  // Auto-focus barcode input only when a new active task appears
+  const activeTaskIdRef = useRef<string | null>(null);
   useEffect(() => {
-    barcodeRef.current?.focus();
+    const currentActiveId = pickTasks.find(
+      (t) => t.state === "SOURCE_AT_STATION" || t.state === "PICKING",
+    )?.id ?? null;
+    if (currentActiveId !== activeTaskIdRef.current) {
+      activeTaskIdRef.current = currentActiveId;
+      if (currentActiveId) {
+        barcodeRef.current?.focus();
+      }
+    }
   }, [pickTasks]);
 
   // Cleanup flash timeout
@@ -246,17 +285,6 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
     [handleScan],
   );
 
-  // Dispatch retrieve (manual tote pull)
-  const handleDispatch = useCallback(async (pickTaskId: string) => {
-    try {
-      await wesApi.dispatchRetrieve(pickTaskId);
-      triggerFlash("success", "Tote pull dispatched");
-      wesApi.listPickTasks({ station_id: stationId }).then(setPickTasks).catch(() => {});
-    } catch (err: any) {
-      triggerFlash("error", err.message || "Dispatch failed");
-    }
-  }, [stationId, triggerFlash]);
-
   // Step 1: Scan target tote barcode → sets pendingToteBarcode (does NOT auto-bind).
   const handleScanTote = useCallback(() => {
     if (!toteBarcode.trim()) return;
@@ -302,6 +330,18 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
       triggerFlash("error", err.message || "Tote-full failed");
     }
   }, [stationId, triggerFlash, queryClient]);
+
+  // Clear slot handler: clears a "ready" slot's tote binding (no active task).
+  const handleClearSlot = useCallback(async (slotId: string) => {
+    try {
+      await wesApi.clearPutwallSlot(stationId, slotId);
+      Sound.scanSuccess();
+      triggerFlash("success", "Slot cleared");
+      wesApi.getPutwall(stationId).then(setPutwallSlots).catch(() => {});
+    } catch (err: any) {
+      triggerFlash("error", err.message || "Clear failed");
+    }
+  }, [stationId, triggerFlash]);
 
   // Show tote binding when: empty putwall slots exist OR active task needs target tote
   const needsToteBinding = !!(firstEmptySlotId) ||
@@ -367,7 +407,6 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
             completedTasks={completedTasks}
             orders={orders}
             pickTasks={pickTasks}
-            onDispatch={handleDispatch}
           />
         </div>
 
@@ -379,6 +418,7 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
             pendingToteBarcode={pendingToteBarcode}
             onCellBind={handleCellBind}
             onToteFull={handleToteFull}
+            onClearSlot={handleClearSlot}
             toteCapacity={TOTE_CAPACITY}
           />
         </div>
@@ -417,7 +457,7 @@ export function StationOperatorView({ stationId, stationName, onClose }: Props) 
 
 // ------------------------------------------------------------------ Top Left: Product Info
 
-function TopLeftProductInfo({
+const TopLeftProductInfo = React.memo(function TopLeftProductInfo({
   task,
   product,
   order,
@@ -537,25 +577,23 @@ function TopLeftProductInfo({
       </div>
     </div>
   );
-}
+});
 
 // ------------------------------------------------------------------ Top Right: Task Queue
 
-function TopRightTaskQueue({
+const TopRightTaskQueue = React.memo(function TopRightTaskQueue({
   activeTask,
   pendingTasks,
   returningTasks,
   completedTasks,
   orders,
   pickTasks,
-  onDispatch,
 }: {
   activeTask: PickTask | null;
   pendingTasks: PickTask[];
   returningTasks: PickTask[];
   completedTasks: PickTask[];
   orders: Order[];
-  onDispatch: (pickTaskId: string) => void;
   pickTasks: PickTask[];
 }) {
   const orderForTask = (taskOrderId: string) =>
@@ -645,29 +683,8 @@ function TopRightTaskQueue({
                 <span>{task.qty_picked}/{task.qty_to_pick} ({pct}%)</span>
               </div>
 
-              {/* Pull Tote button for SOURCE_REQUESTED tasks */}
-              {task.state === "SOURCE_REQUESTED" && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onDispatch(task.id); }}
-                  style={{
-                    marginTop: 6,
-                    width: "100%",
-                    padding: "5px 0",
-                    background: "#eab308",
-                    color: "#000",
-                    border: "none",
-                    borderRadius: 4,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  Pull Tote
-                </button>
-              )}
-
               {/* Mini progress bar */}
-              {task.state !== "COMPLETED" && task.state !== "SOURCE_REQUESTED" && (
+              {task.state !== "COMPLETED" && (
                 <div style={{ height: 2, background: "#2d3148", borderRadius: 1, marginTop: 4, overflow: "hidden" }}>
                   <div
                     style={{
@@ -685,7 +702,7 @@ function TopRightTaskQueue({
       </div>
     </div>
   );
-}
+});
 
 // ------------------------------------------------------------------ Bottom Left: Put-Wall
 
@@ -757,12 +774,13 @@ function buildPutWallSlots(
   return slots;
 }
 
-function BottomLeftPutWall({
+const BottomLeftPutWall = React.memo(function BottomLeftPutWall({
   slots,
   activeTaskId,
   pendingToteBarcode,
   onCellBind,
   onToteFull,
+  onClearSlot,
   toteCapacity,
 }: {
   slots: PutWallSlotData[];
@@ -770,6 +788,7 @@ function BottomLeftPutWall({
   pendingToteBarcode: string | null;
   onCellBind: (slotId: string) => void;
   onToteFull: (taskId: string) => void;
+  onClearSlot: (slotId: string) => void;
   toteCapacity: number;
 }) {
   return (
@@ -798,8 +817,10 @@ function BottomLeftPutWall({
           const canBind = !!pendingToteBarcode && !slot.toteBarcode && !slot.bound && !slot.ready && !!slot.slotId;
           // Cell is clickable for tote-full when it has a task and is bound (including DONE cells)
           const canMarkFull = slot.assigned && slot.bound && !!slot.taskId;
+          // Cell is clickable for clearing when it has a tote but no active task (ready state)
+          const canClear = slot.ready && !slot.assigned && !!slot.slotId;
 
-          const isClickable = canBind || canMarkFull;
+          const isClickable = canBind || canMarkFull || canClear;
 
           return (
             <div
@@ -809,6 +830,8 @@ function BottomLeftPutWall({
                   onCellBind(slot.slotId);
                 } else if (canMarkFull && slot.taskId) {
                   onToteFull(slot.taskId);
+                } else if (canClear && slot.slotId) {
+                  onClearSlot(slot.slotId);
                 }
               }}
               style={{
@@ -908,8 +931,11 @@ function BottomLeftPutWall({
                   </div>
                 </>
               ) : slot.ready ? (
-                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4 }}>
                   <span style={{ fontSize: 11, color: "#22c55e", opacity: 0.7 }}>Tote ready</span>
+                  {canClear && (
+                    <span style={{ fontSize: 10, color: "#ef4444", opacity: 0.8 }}>Click to clear slot</span>
+                  )}
                 </div>
               ) : canBind ? (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -943,11 +969,11 @@ function BottomLeftPutWall({
       </div>
     </div>
   );
-}
+});
 
 // ------------------------------------------------------------------ Bottom Right: Scan Interface
 
-function BottomRightScan({
+const BottomRightScan = React.memo(function BottomRightScan({
   activeTask,
   barcode,
   setBarcode,
@@ -1355,4 +1381,4 @@ function BottomRightScan({
       </div>
     </div>
   );
-}
+});

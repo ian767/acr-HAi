@@ -45,12 +45,15 @@ async def _handle_order_allocated(event) -> None:
     """OrderAllocated -> create PickTask (CREATED) -> reserve K50H -> SOURCE_REQUESTED."""
     logger.info("OrderAllocated: order=%s station=%s", event.order_id, event.station_id)
 
+    # Collect retrieve event to publish AFTER session closes (avoids
+    # SQLite nested-session "database is locked" errors).
+    pending_retrieve = None
+
     async with handler_session() as session:
         from sqlalchemy import select
-        from src.wes.domain.models import Order
+        from src.wes.domain.models import Order, PickTask
         from src.wes.application.pick_task_service import PickTaskService
         from src.ess.domain.models import Tote
-        from src.wes.domain.events import RetrieveSourceTote
         from src.shared.event_bus import event_bus
 
         order = await session.get(Order, event.order_id)
@@ -67,34 +70,61 @@ async def _handle_order_allocated(event) -> None:
             qty=order.quantity,
         )
 
-        # Find a tote for this SKU
+        # Find a tote for this SKU, preferring totes NOT already assigned
+        # to another active pick task (enables parallel A42TD dispatch).
+        from src.wes.domain.enums import PickTaskState as _PTS
+        _in_use_ids = select(PickTask.source_tote_id).where(
+            PickTask.source_tote_id.isnot(None),
+            PickTask.state.notin_([_PTS.COMPLETED]),
+        )
         result = await session.execute(
             select(Tote).where(
                 Tote.sku == order.sku,
                 Tote.quantity > 0,
                 Tote.current_location_id.isnot(None),
+                Tote.id.notin_(_in_use_ids),
             ).limit(1)
         )
         tote = result.scalar_one_or_none()
+        if tote is None:
+            # All totes in use — fall back to any tote (will serialize via is_tote_in_use)
+            result = await session.execute(
+                select(Tote).where(
+                    Tote.sku == order.sku,
+                    Tote.quantity > 0,
+                    Tote.current_location_id.isnot(None),
+                ).limit(1)
+            )
+            tote = result.scalar_one_or_none()
 
         if tote is not None:
             pick_task.source_tote_id = tote.id
             await session.flush()
 
             # Transition CREATED -> RESERVED -> SOURCE_REQUESTED
-            # Tote pull (RetrieveSourceTote) is NOT auto-dispatched here.
-            # The operator must manually trigger it via the "Pull Tote"
-            # button (POST /wes/pick-tasks/{id}/dispatch).
+            # K50H reservation happens later when it picks up the tote
+            # at the cantilever (via _handle_source_at_cantilever).
             await pts.transition_state(pick_task.id, "reserve")
             await pts.transition_state(pick_task.id, "request_source")
 
             for evt in pts.collect_events():
                 await event_bus.publish(evt)
 
-            await session.commit()
+            # Store retrieve event data for publishing after session closes
+            from src.wes.domain.events import RetrieveSourceTote
+            pending_retrieve = RetrieveSourceTote(
+                pick_task_id=pick_task.id,
+                tote_id=tote.id,
+                source_location_id=tote.current_location_id,
+                station_id=event.station_id,
+            )
         else:
             logger.warning("No tote found for SKU %s", order.sku)
-            await session.commit()
+
+    # Publish OUTSIDE handler_session to avoid nested session conflicts.
+    if pending_retrieve is not None:
+        from src.shared.event_bus import event_bus
+        await event_bus.publish(pending_retrieve)
 
     await ws_broadcast("order.updated", {
         "order_id": str(event.order_id),

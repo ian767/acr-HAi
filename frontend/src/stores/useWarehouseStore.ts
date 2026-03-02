@@ -4,7 +4,7 @@ import type { Station } from "../types/station";
 import type { PickTask } from "../types/pickTask";
 import type { Order } from "../types/order";
 import type { Alarm } from "../types/alarm";
-import type { KPIPayload } from "../types/websocket";
+import type { KPIPayload, AllocationStatsPayload } from "../types/websocket";
 
 export interface RobotAnimation {
   fromRow: number;
@@ -28,6 +28,15 @@ interface WarehouseState {
 
   // Heatmap data: "row,col" -> congestion value (0..1)
   heatmap: Record<string, number>;
+
+  // Allocation skew diagnostics
+  allocationStats: AllocationStatsPayload | null;
+
+  // Tote origin heatmap
+  toteOriginHeatmap: {
+    allocated: Record<string, number>;
+    completed: Record<string, number>;
+  } | null;
 
   // Connection status
   connected: boolean;
@@ -58,6 +67,8 @@ interface WarehouseState {
   clearAlarm: (alarmId: string) => void;
   setConnected: (connected: boolean) => void;
   updateHeatmap: (cells: Record<string, number>) => void;
+  updateAllocationStats: (stats: AllocationStatsPayload) => void;
+  updateToteOriginHeatmap: (data: { allocated: Record<string, number>; completed: Record<string, number> }) => void;
   resetAll: () => void;
 }
 
@@ -70,6 +81,8 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
   kpi: null,
   robotAnimations: {},
   heatmap: {},
+  allocationStats: null,
+  toteOriginHeatmap: null,
   connected: false,
 
   setSnapshot: (data) =>
@@ -200,6 +213,10 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
 
   updateHeatmap: (cells) => set({ heatmap: cells }),
 
+  updateAllocationStats: (stats) => set({ allocationStats: stats }),
+
+  updateToteOriginHeatmap: (data) => set({ toteOriginHeatmap: data }),
+
   resetAll: () =>
     set({
       robots: {},
@@ -210,5 +227,7 @@ export const useWarehouseStore = create<WarehouseState>((set) => ({
       kpi: null,
       robotAnimations: {},
       heatmap: {},
+      allocationStats: null,
+      toteOriginHeatmap: null,
     }),
 }));

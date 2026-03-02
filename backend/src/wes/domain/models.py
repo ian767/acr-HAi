@@ -88,6 +88,7 @@ class Station(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     current_robot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    queue_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     put_wall_slots: Mapped[list["PutWallSlot"]] = relationship(back_populates="station")
 

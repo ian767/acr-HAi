@@ -106,8 +106,13 @@ class FleetManager:
         robot_type: RobotType,
         target_row: int,
         target_col: int,
+        aisle_rows: set[int] | None = None,
     ) -> Robot | None:
         """Find the nearest IDLE robot of the given type using Manhattan distance.
+
+        For A42TD robots with a territory (``territory_col_min/max``), only
+        robots whose territory covers ``target_col`` are considered.  An
+        A42TD without a territory can cover any column.
 
         Returns ``None`` when no idle robot of that type exists in the zone.
         """
@@ -116,7 +121,45 @@ class FleetManager:
         if not candidates:
             return None
 
+        # Queue lock: exclude robots currently in a station queue (O(1) check).
+        from src.wes.application.station_queue_service import is_robot_in_any_queue
+        free = [r for r in candidates if not is_robot_in_any_queue(r.id)]
+        if free:
+            candidates = free
+        else:
+            # All candidates are queue-bound — return None so orphan retry
+            # handles this later when a robot is freed.
+            return None
+
+        # A42TD territory filtering: prefer robots whose territory covers
+        # the target cell.  If none match, fall back to unassigned robots.
+        if robot_type == RobotType.A42TD:
+            in_territory = []
+            no_territory = []
+            for r in candidates:
+                if r.territory_col_min is not None:
+                    col_ok = r.territory_col_min <= target_col <= r.territory_col_max
+                    row_ok = True
+                    if r.territory_row_min is not None:
+                        # Allow ±1 row from territory so the A42TD can serve
+                        # totes on rack rows adjacent to its aisle.
+                        row_ok = (r.territory_row_min - 1) <= target_row <= (r.territory_row_max + 1)
+                    if col_ok and row_ok:
+                        in_territory.append(r)
+                else:
+                    no_territory.append(r)
+            if in_territory:
+                candidates = in_territory
+            elif no_territory:
+                candidates = no_territory
+            # else: all have territory but none covers target → keep all as fallback
+
         def manhattan(r: Robot) -> int:
             return abs(r.grid_row - target_row) + abs(r.grid_col - target_col)
+
+        if aisle_rows:
+            non_aisle = [r for r in candidates if r.grid_row not in aisle_rows]
+            if non_aisle:
+                candidates = non_aisle
 
         return min(candidates, key=manhattan)
