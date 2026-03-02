@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Callable, Coroutine
+
+logger = logging.getLogger(__name__)
 
 
 class PhysicsEngine:
@@ -139,5 +142,11 @@ class PhysicsEngine:
                 await asyncio.sleep(0.05)
                 continue
             interval_s = (self._base_interval_ms / 1000.0) / self._speed
-            await self.tick()
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception(
+                    "PhysicsEngine tick %d CRASHED — continuing",
+                    self._elapsed_ticks,
+                )
             await asyncio.sleep(interval_s)
